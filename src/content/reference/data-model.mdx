@@ -1,0 +1,300 @@
+---
+title: Data model
+description: Every Prisma model, its purpose, key fields, enum values, unique constraints, and the migration workflow.
+---
+
+RsOpsHub stores all state in a PostgreSQL database managed by Prisma. The generator is `prisma-client-js` with binary targets `native` (local development) and `rhel-openssl-3.0.x` (Vercel). The datasource reads `DATABASE_URL` for runtime queries and `DIRECT_DATABASE_URL` for migrations (non-pooled endpoint required by the full session protocol).
+
+Models are grouped by area below. Every model with a `workspaceId` foreign key cascades on workspace deletion. Five models (Workspace, ContentRecord, Task, Document, Spreadsheet) include a `deletedAt` field for soft deletes.
+
+## Workspace
+
+### Workspace
+
+Container for all workspace-scoped data. One deployment can host multiple workspaces.
+
+Key fields:
+
+| Field | Type | Notes |
+|---|---|---|
+| `slug` | `String` | URL-safe identifier, unique across all workspaces. |
+| `accessCode` | `String` | 16-character hex secret for viewer login, unique. |
+| `codeVersion` | `Int` | Incremented on access code rotation; embedded in viewer session fingerprints so old sessions are rejected immediately. Default `1`. |
+| `timezone` | `String` | IANA timezone (for example `America/New_York`). Controls day boundaries for work logs, heatmaps, and cron jobs. Default `"UTC"`. |
+| `workHoursEnabled` | `Boolean` | Opt-in toggle for the Hours feature. Default `false`. |
+| `sortOrder` | `Int` | Display order in the sidebar (ascending). Default `0`. |
+
+Integration connection fields are stored directly on the workspace row. Fields that hold third-party secrets (`googleRefreshToken`, `linearApiKey`, `devtoApiKey`, `posthogApiKey`, `cloudflareApiToken`) are AES-256-GCM encrypted at rest. Each integration also has an enabled toggle (default `true`) and a `*LastSyncAt` timestamp.
+
+### WorkHourEntry
+
+One row per workspace per calendar day, recording hours worked.
+
+| Field | Type | Notes |
+|---|---|---|
+| `date` | `DateTime` (`@db.Date`) | Calendar day, normalised to midnight. |
+| `hours` | `Float` | Hours worked. Default `0`. |
+
+Unique constraint: `[workspaceId, date]`. Only active when `Workspace.workHoursEnabled` is `true`.
+
+### ViewerJoin
+
+Audit log entry created each time a viewer successfully enters an access code.
+
+| Field | Type | Notes |
+|---|---|---|
+| `email` | `String` | Email the viewer provided at login. |
+| `codeVersion` | `Int` | Snapshot of the active code version at join time. |
+| `ipAddress` | `String?` | Client IP address. |
+| `userAgent` | `String?` | Client user-agent string. |
+
+### OwnerProfile
+
+Single row keyed by the owner's email (matches `OWNER_EMAIL`). Stores the display name, avatar (path or raw bytes with MIME type), and an IANA timezone string (default `"UTC"`). No secrets are stored on this model.
+
+## Content
+
+### Enums
+
+**ContentType** (8 values): `REDDIT_POST`, `REDDIT_COMMENT`, `REDDIT_REPLY`, `HACKERNEWS_POST`, `HACKERNEWS_COMMENT`, `BLOG_POST`, `SOCIAL_POST`, `CUSTOM`.
+
+**Platform** (8 values): `REDDIT`, `HACKERNEWS`, `DEV_TO`, `TWITTER`, `LINKEDIN`, `BLOG`, `YOUTUBE`, `OTHER`.
+
+**ContentStatus** (6 values): `BACKLOG`, `IDEA`, `DRAFT`, `SCHEDULED`, `PUBLISHED`, `ARCHIVED`.
+
+### ContentRecord
+
+Posts, comments, and articles synced from external platforms or created manually.
+
+| Field | Type | Notes |
+|---|---|---|
+| `type` | `ContentType` | Discriminator for the content kind. |
+| `status` | `ContentStatus` | Workflow status. Default `IDEA`. |
+| `platform` | `Platform?` | Source platform. |
+| `externalId` | `String?` | Provider-specific dedup key, for example `hn:47729049` or `reddit:t3_abc`. |
+| `impressions`, `upvotes`, `downvotes`, `comments`, `shares`, `traffic` | `Int` | Engagement counters, all default `0`. |
+| `engagementRate`, `ctr` | `Float?` | Derived engagement metrics. |
+
+Unique constraint: `[workspaceId, externalId]`.
+
+### ContentMetric
+
+Time-series snapshot of a `ContentRecord`'s engagement counters. Each row captures a point-in-time reading of impressions, upvotes, downvotes, comments, shares, and traffic. Cascades on content deletion.
+
+### Campaign
+
+Optional grouping for content records. Has a name, optional description, color, and date range (`startsAt` / `endsAt`).
+
+### Tag and ContentTag
+
+Free-form tags on content records. `Tag` is unique on `[workspaceId, name]`. `ContentTag` is a join table with a composite primary key `[contentId, tagId]`.
+
+## Tasks and work
+
+### Enums
+
+**TaskStatus** (6 values): `BACKLOG`, `TODO`, `IN_PROGRESS`, `BLOCKED`, `DONE`, `CANCELED`.
+
+**Priority** (4 values): `LOW`, `MEDIUM`, `HIGH`, `URGENT`.
+
+### Task
+
+Local task with a title, optional description, status, priority, due date, and optional link to a content record.
+
+| Field | Type | Notes |
+|---|---|---|
+| `status` | `TaskStatus` | Default `TODO`. |
+| `priority` | `Priority` | Default `MEDIUM`. |
+| `dueAt` | `DateTime?` | Optional deadline. |
+| `startedAt` | `DateTime?` | When work began. |
+| `completedAt` | `DateTime?` | When the task was finished. |
+| `linkedContentId` | `String?` | Optional reference to a `ContentRecord`. |
+
+### WorkLog
+
+One summary row per workspace per day. Optionally AI-generated.
+
+| Field | Type | Notes |
+|---|---|---|
+| `date` | `DateTime` | The calendar day this log covers. |
+| `summary` | `String?` | Human-readable summary (may be AI-generated). |
+| `hoursLogged` | `Float?` | Optional hours worked. |
+| `metricsJson` | `Json?` | Arbitrary metrics snapshot for the day. |
+
+Unique constraint: `[workspaceId, date]`.
+
+## Documents and spreadsheets
+
+### Enums
+
+**DocProvider** (3 values): `LOCAL`, `NOTION`, `GOOGLE_DOCS`.
+
+**SheetProvider** (2 values): `LOCAL`, `GOOGLE_SHEETS`.
+
+### Document
+
+Documents stored locally or linked from Notion or Google Docs.
+
+| Field | Type | Notes |
+|---|---|---|
+| `provider` | `DocProvider` | Where the canonical body lives. Default `LOCAL`. |
+| `externalId` | `String?` | Notion page ID or Google Doc file ID. |
+| `contentJson` | `Json?` | Body content for `LOCAL` documents. |
+| `isShared` | `Boolean` | Whether viewers can see this document. Default `false`. |
+| `ownedByMe` | `Boolean` | `true` for documents this workspace created. `false` for shared-with-me files; deleting only unlinks without trashing the source. Default `true`. |
+| `parentId` | `String?` | Self-referential foreign key for a document tree structure. |
+
+Unique constraint: `[workspaceId, provider, externalId]`.
+
+### Spreadsheet
+
+Spreadsheet files stored locally (raw bytes in `data`) or linked from Google Sheets.
+
+| Field | Type | Notes |
+|---|---|---|
+| `provider` | `SheetProvider` | Default `LOCAL`. |
+| `externalId` | `String?` | Google Sheets file ID. |
+| `mimeType` | `String?` | MIME type for local uploads (for example `text/csv`). |
+| `sizeBytes` | `Int?` | File size for local uploads. |
+| `data` | `Bytes?` | Raw file bytes for local uploads. |
+| `isShared` | `Boolean` | Default `false`. |
+| `ownedByMe` | `Boolean` | Default `true`. |
+
+Unique constraint: `[workspaceId, provider, externalId]`.
+
+### SharedDocOffer
+
+Pending Google Drive file (Doc or Sheet) that has been shared with the connected Google account but not yet claimed by a workspace.
+
+| Field | Type | Notes |
+|---|---|---|
+| `kind` | `String` | `"DOC"` or `"SHEET"`. Default `"DOC"`. |
+| `status` | `String` | `"PENDING"`, claimed, or dismissed. Default `"PENDING"`. |
+| `accountEmail` | `String` | Google account that received the share. |
+| `fileId` | `String` | Google Drive file ID. |
+
+Unique constraint: `[accountEmail, fileId]`.
+
+## Calendar
+
+### Enum
+
+**EventType** (5 values): `GENERAL`, `PUBLISHING`, `DEADLINE`, `MEETING`, `REMINDER`.
+
+### CalendarEvent
+
+Events created inside RsOpsHub. Google Calendar events are fetched live from the Google API and are not stored in this table.
+
+| Field | Type | Notes |
+|---|---|---|
+| `startsAt` | `DateTime` | Event start time. |
+| `endsAt` | `DateTime` | Event end time. |
+| `allDay` | `Boolean` | Default `false`. |
+| `type` | `EventType` | Default `GENERAL`. |
+| `linkedContentId` | `String?` | Optional link to a content record. |
+| `linkedTaskId` | `String?` | Optional link to a task. |
+
+## Notifications
+
+### Enum
+
+**NotifSource** (6 values): `INTERNAL`, `NOTION`, `SHEETS`, `LINEAR`, `SYSTEM`, `GOOGLE_DOCS`.
+
+### Notification
+
+| Field | Type | Notes |
+|---|---|---|
+| `source` | `NotifSource` | Origin of the notification. |
+| `kind` | `String` | Application-defined category. |
+| `title` | `String` | Summary line. |
+| `body` | `String?` | Optional detail text. |
+| `url` | `String?` | Deep link. |
+| `readAt` | `DateTime?` | `null` while unread. |
+| `externalId` | `String?` | Provider-specific dedup key. |
+
+## Views
+
+### Enums
+
+**ViewResource** (5 values): `CONTENT`, `TASK`, `WORKLOG`, `DOCUMENT`, `EVENT`.
+
+**ViewKind** (5 values): `TABLE`, `KANBAN`, `CALENDAR`, `TIMELINE`, `ANALYTICS`.
+
+### View
+
+Saved view configuration. Each row binds a resource type to a presentation kind with a `configJson` payload that stores filters, sort order, and column visibility.
+
+## Linear
+
+### LinearTeam
+
+Cached copy of a Linear team. Stores the team's `externalId`, `key` (for example `ENG`), `name`, and optional `color` and `icon`. Unique on `[workspaceId, externalId]`.
+
+### LinearIssue
+
+Local mirror of a Linear issue. The full field set is cached so the UI stays responsive without waiting for the Linear API.
+
+| Field | Type | Notes |
+|---|---|---|
+| `externalId` | `String` | Linear node ID. |
+| `identifier` | `String` | Human-readable identifier, for example `ENG-42`. |
+| `number` | `Int` | Issue number within its team. |
+| `stateType` | `String?` | One of `backlog`, `unstarted`, `started`, `completed`, `canceled`, `triage`. |
+| `priority` | `Int` | Priority level (0-4, Linear convention). Default `0`. |
+| `estimate` | `Float?` | Story points on the team's configured scale. |
+| `labels` | `Json?` | JSON array of `{ id, name, color }` objects. |
+| `parentExternalId` | `String?` | Linear node ID of the parent issue, if any. |
+
+Unique constraint: `[workspaceId, externalId]`. Writes go to Linear first; the local row is refreshed on success.
+
+### LinearIssueTemplate
+
+Reusable templates for creating Linear issues. Two origins:
+
+- `LOCAL`: created inside RsOpsHub.
+- `LINEAR`: mirrored from Linear's template library during sync. Never written back to Linear.
+
+Stores default title, body, team, priority, labels, and optional `children` (a JSON array of sub-issue definitions). Unique on `[workspaceId, externalId]`.
+
+## Audit
+
+### ActivityLog
+
+Append-only log of actions taken in a workspace.
+
+| Field | Type | Notes |
+|---|---|---|
+| `action` | `String` | What happened (for example `create`, `update`, `delete`). |
+| `entityType` | `String` | Model name of the affected record. |
+| `entityId` | `String` | Primary key of the affected record. |
+| `metadata` | `Json?` | Arbitrary context about the change. |
+
+## Migration workflow
+
+RsOpsHub uses two Prisma workflows depending on the environment:
+
+**Development**: push schema changes directly to the database without generating migration files.
+
+```bash
+bun run db:push
+```
+
+This runs `prisma db push`, which applies the current `schema.prisma` to the connected database. Suitable for rapid iteration but does not produce versioned migration history.
+
+**Versioned migrations**: generate a migration file that captures the diff, then apply it.
+
+```bash
+bun run db:migrate
+```
+
+This runs `prisma migrate dev`, which creates a timestamped SQL migration in `prisma/migrations/` and applies it. Use this when you need a reproducible migration history.
+
+**Production**: apply pending migrations without interactive prompts.
+
+```bash
+npx prisma migrate deploy
+```
+
+This is the command to run in CI or on a production host. It applies all unapplied migrations in order and exits with a non-zero code on failure.
+
+The `DIRECT_DATABASE_URL` variable (configured in `prisma/schema.prisma` as `directUrl`) must point at a non-pooled PostgreSQL endpoint. Both `prisma migrate` and `prisma db push` need the full session protocol that connection poolers such as PgBouncer in transaction mode do not expose.

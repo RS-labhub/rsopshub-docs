@@ -1,0 +1,253 @@
+---
+title: Deployment
+description: Deploy RsOpsHub to Vercel, Fly.io, Railway, a self-hosted VM, or Docker, and migrate your database to a managed PostgreSQL provider.
+---
+
+RsOpsHub is a Next.js 16 app with a PostgreSQL dependency. It runs anywhere that can host a Node.js server and reach a Postgres database. This guide covers the most common hosting options, database migration, custom domains, and backups.
+
+## Prerequisites
+
+Before deploying, make sure you have values ready for the required environment variables. See [Configuration](/configuration) for the full list. At a minimum you need:
+
+- `DATABASE_URL` pointing at a PostgreSQL instance
+- `OWNER_EMAIL` and `OWNER_PASSWORD` (minimum 12 characters)
+- `SESSION_SECRET` (minimum 32 characters)
+- `TOKEN_ENC_KEY` (minimum 32 characters)
+- `APP_URL` set to the public HTTPS URL of your deployment
+
+## Platforms at a glance
+
+| Platform | In-process cron works | Postgres included | Notes |
+|---|---|---|---|
+| Vercel | No, use Vercel Cron Jobs | No, pair with Neon or Supabase | Zero-config build and TLS |
+| Fly.io | Yes | Optional Fly Postgres | Real VM with friendly CLI |
+| Railway | Yes | One-click Postgres plugin | Fastest bundled setup |
+| Self-hosted VM | Yes | Install locally or use remote | Full control |
+| Docker | Yes | Use a sidecar Postgres container | Portable, air-gapped friendly |
+
+## Build output
+
+`bun run build` runs `prisma generate && next build` and produces the compiled app in `.next/`. The standard build requires the full `node_modules` directory at runtime. If you need a smaller deployment artifact for Docker or similar hosts, add `output: "standalone"` to `next.config.ts` and Next.js will produce a self-contained `.next/standalone/` directory.
+
+## Background jobs and cron
+
+RsOpsHub runs three nightly jobs: content sync (Hacker News, Reddit, dev.to), notification refresh (Linear sync, shared-doc offers, overdue-task scan), and work-log backfill. On long-running hosts the in-process `node-cron` scheduler handles these automatically. On Vercel the process is serverless, so `node-cron` never fires and you must use the `/api/cron` HTTP endpoint instead.
+
+The in-process scheduler uses these schedules (system timezone):
+
+| Time | Job |
+|---|---|
+| 02:00 | `content` |
+| 02:30 | `notifications` |
+| 03:00 | `worklog` |
+
+Each run has a 15-minute budget. The scheduler calls `cron.schedule()` without an explicit timezone option, so jobs fire according to the host's system clock. Set `TZ=UTC` in your environment if you want the times above to mean UTC.
+
+### Serverless cron endpoint
+
+`/api/cron` accepts GET or POST. It requires `CRON_SECRET` to be set and checks the `Authorization` header:
+
+```
+Authorization: Bearer <CRON_SECRET>
+```
+
+The route has a `maxDuration` of 300 seconds and a processing budget of 260 seconds. It accepts two optional query parameters:
+
+- `jobs` selects a comma-separated subset of `content`, `notifications`, `worklog`. Defaults to all three.
+- `workspaceId` scopes the run to a single workspace.
+
+Workspaces are processed in order of staleness (oldest last-sync timestamp first).
+
+## Vercel
+
+Connect your repository in the Vercel dashboard, set every required environment variable in the project settings, and deploy. Vercel handles the build, CDN, and TLS.
+
+Because Vercel functions are serverless, the in-process `node-cron` scheduler does not run. Instead, add a `CRON_SECRET` environment variable and include a `vercel.json` in the repository root:
+
+```json
+{
+  "crons": [
+    { "path": "/api/cron?jobs=content", "schedule": "0 2 * * *" },
+    { "path": "/api/cron?jobs=notifications", "schedule": "30 2 * * *" },
+    { "path": "/api/cron?jobs=worklog", "schedule": "0 3 * * *" }
+  ]
+}
+```
+
+Vercel automatically sends `Authorization: Bearer <CRON_SECRET>` when invoking cron jobs. All three jobs hit the single `/api/cron` route with a `jobs` query parameter to select which job to run. Vercel runs cron jobs in UTC.
+
+Vercel does not include a database. Point `DATABASE_URL` at Neon or Supabase (see the migration sections below). If you use a pooled connection (PgBouncer), set `DIRECT_DATABASE_URL` to the non-pooled endpoint so that `prisma db push` can use full session-mode connections.
+
+## Fly.io
+
+Generate a configuration with `fly launch` and accept the defaults. Add a release command that pushes the database schema on every deploy by including this in `fly.toml`:
+
+```toml
+[deploy]
+  release_command = "bunx prisma db push"
+```
+
+Set the required secrets:
+
+```bash
+fly secrets set \
+  DATABASE_URL="postgres://..." \
+  OWNER_EMAIL="you@example.com" \
+  OWNER_PASSWORD="your-strong-passphrase" \
+  SESSION_SECRET="$(openssl rand -base64 48)" \
+  TOKEN_ENC_KEY="$(openssl rand -base64 32)" \
+  APP_URL="https://your-app.fly.dev"
+```
+
+The in-process cron scheduler works on Fly because the machine is a long-running VM.
+
+For Postgres, create one on the same private network with `fly postgres create` and attach it with `fly postgres attach`. For larger workloads, point `DATABASE_URL` at Neon or Supabase instead.
+
+## Railway
+
+Connect your repository in the Railway dashboard. Add a Postgres plugin from the marketplace. Railway provisions the database and injects `DATABASE_URL` automatically.
+
+Set the remaining variables in the project's Variables tab. The build command is `bun run build`, and the start command is `bun run start`. After the first deploy, push the database schema by running `bunx prisma db push` in Railway's shell or by setting the deploy command to `bunx prisma db push && bun run start`. The in-process cron scheduler works on Railway because the process is long-running.
+
+If you prefer an external database, skip the marketplace plugin and paste your own `DATABASE_URL`.
+
+## Self-hosted VM
+
+Provision a VM (Ubuntu 22.04 or 24.04), install Node.js and Bun, and install PostgreSQL locally or point at a remote database. Then clone the repository, install dependencies, and build:
+
+```bash
+git clone <your-repo-url> /srv/rsopshub
+cd /srv/rsopshub
+bun install
+bun run build
+```
+
+Create an `.env.local` file with all required variables, then push the database schema to create the tables:
+
+```bash
+bunx prisma db push
+```
+
+`prisma db push` reads `DATABASE_URL` from the environment or `.env` file. Then create a systemd unit to keep the process alive:
+
+```ini
+# /etc/systemd/system/rsopshub.service
+[Unit]
+Description=RsOpsHub Next.js server
+After=network.target
+
+[Service]
+WorkingDirectory=/srv/rsopshub
+Environment=NODE_ENV=production
+EnvironmentFile=/srv/rsopshub/.env.local
+ExecStart=/usr/bin/bun run start
+Restart=on-failure
+User=rsopshub
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start the service:
+
+```bash
+systemctl daemon-reload
+systemctl enable --now rsopshub
+```
+
+The server listens on port 3000. Put it behind a reverse proxy for TLS. Caddy handles certificates automatically:
+
+```
+your-domain.com {
+    reverse_proxy localhost:3000
+}
+```
+
+With nginx, pair it with certbot for Let's Encrypt certificates.
+
+The in-process cron scheduler works here because the server process stays alive indefinitely.
+
+## Docker
+
+Build a multi-stage image with the `oven/bun` base:
+
+```dockerfile
+FROM oven/bun:1 AS deps
+WORKDIR /app
+COPY package.json bun.lockb ./
+RUN bun install --frozen-lockfile
+
+FROM oven/bun:1 AS build
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN bun run build
+
+FROM oven/bun:1 AS run
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=build /app ./
+EXPOSE 3000
+CMD ["bun", "run", "start"]
+```
+
+Build and run. On first launch, push the database schema before starting the server:
+
+```bash
+docker build -t rsopshub .
+docker run --env-file .env.local rsopshub bunx prisma db push
+docker run -p 3000:3000 --env-file .env.local rsopshub
+```
+
+For a complete stack with Postgres, use Docker Compose with a `postgres:16` sidecar service. The in-process cron scheduler works inside the container because the Bun process is long-running.
+
+## Migrate Postgres to Neon
+
+Create a Neon project in the region closest to your app host. Copy the connection string, then dump your existing database and restore it:
+
+```bash
+pg_dump "$DATABASE_URL" > rsopshub.sql
+psql "<neon-connection-string>" < rsopshub.sql
+```
+
+Set `DATABASE_URL` to the Neon pooled connection string. Set `DIRECT_DATABASE_URL` to the non-pooled endpoint (the hostname without `-pooler`) so that `prisma db push` can use full session-mode connections. If Prisma reports errors about prepared statements on the pooled endpoint, append `?pgbouncer=true&connection_limit=1` to `DATABASE_URL`.
+
+Redeploy. No code changes are needed.
+
+## Migrate Postgres to Supabase
+
+Create a Supabase project and find the connection string under **Project settings, Database, Connection string**. Use the Session mode string (port 5432) for `DATABASE_URL`. Then dump and restore:
+
+```bash
+pg_dump "$DATABASE_URL" > rsopshub.sql
+psql "<supabase-connection-string>" < rsopshub.sql
+```
+
+The Transaction mode string (port 6543, pooled by PgBouncer) requires `?pgbouncer=true` appended to the connection string. If you use pooling, set `DIRECT_DATABASE_URL` to the Session mode endpoint for `prisma db push`.
+
+## Migrate to any other managed Postgres
+
+The pattern is the same for AWS RDS, Google Cloud SQL, Azure Database for PostgreSQL, DigitalOcean Managed Databases, and others. Provision the database, dump from your current source with `pg_dump`, restore with `psql`, and update `DATABASE_URL`. If the provider requires SSL, append `?sslmode=require` to the connection string.
+
+## Custom domain and TLS
+
+Point your domain's DNS record at your host, then enable TLS. Vercel, Fly.io, and Railway handle the certificate automatically. On a self-hosted VM, use Caddy (automatic TLS) or nginx with certbot.
+
+After enabling HTTPS, update `APP_URL` to your `https://` domain. Google OAuth uses `APP_URL` to build the redirect URI (`<APP_URL>/api/integrations/google/callback`). A stale `http://localhost:3000` value causes Google to reject the redirect with a `redirect_uri_mismatch` error. Make sure the same callback URL is listed in your Google Cloud Console authorized redirect URIs.
+
+## After deploying
+
+1. Sign in as the owner to verify that the session cookie round-trips correctly.
+2. Open the Integrations page and connect any services you need (Google, Linear, dev.to, Notion, PostHog, Cloudflare).
+3. On long-running hosts, watch the server logs around 02:00 (in the host's system timezone) for the first content sync to confirm the cron scheduler is running. On Vercel, check the Vercel Cron logs in the dashboard.
+
+## Backups
+
+A daily `pg_dump` to object storage (S3, R2, Backblaze B2) is the simplest backup strategy:
+
+```bash
+pg_dump "$DATABASE_URL" | gzip > rsopshub-$(date -I).sql.gz
+```
+
+Add that to a system cron job on the host, or rely on your managed database provider's automated snapshots. Test a restore into a clean Postgres instance periodically to confirm backups are usable.

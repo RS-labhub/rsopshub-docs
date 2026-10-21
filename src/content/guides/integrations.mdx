@@ -1,0 +1,296 @@
+---
+title: Integrations
+description: Connect content platforms, project trackers, document providers, analytics services, and an AI assistant to your workspaces.
+---
+
+RsOpsHub connects to external services at two levels: **global** credentials set
+once as environment variables, and **per-workspace** credentials entered in
+each workspace's Settings or Integrations page. The table below shows which
+scope each integration uses.
+
+| Integration | Credential scope | Credential type |
+|---|---|---|
+| Hacker News | Per-workspace | Public handle (no secret) |
+| Reddit | Per-workspace | Public handle (no secret) |
+| dev.to | Per-workspace | Public handle, optional API key (encrypted at rest) |
+| Linear | Per-workspace | Personal API key (encrypted at rest) |
+| Notion | Global env var + per-workspace page ID | Internal integration token |
+| Google (Docs, Sheets, Calendar, Meet) | Global env vars + per-workspace OAuth | OAuth client ID/secret (env), refresh token (encrypted at rest) |
+| PostHog | Per-workspace | Personal API key + project ID (encrypted at rest) |
+| Cloudflare | Per-workspace | API token + zone ID (encrypted at rest) |
+| OpenAI / LiteLLM | Global env var | API key |
+
+All secrets stored in the database are encrypted with AES-256-GCM using the
+`TOKEN_ENC_KEY` environment variable. Rotating that key invalidates every stored
+token.
+
+## Hacker News
+
+Hacker News sync uses the public Firebase API. No API key is needed.
+
+**Setup**
+
+1. Open **Settings** for the workspace.
+2. Enter one or more HN usernames in the **HN Username** field (comma-separated for multiple users).
+3. Make sure **HN Enabled** is on (it defaults to on).
+
+**What syncs**
+
+The sync walks each user's `submitted` list (up to 200 items per user), fetches
+each item, and upserts a `ContentRecord` row. Comments are aggregated under
+their root story. Items you have soft-deleted in RsOpsHub are not resurrected on
+the next sync.
+
+Synced fields: title, URL, body text, score (upvotes), and descendant comment
+count.
+
+**Sync schedule**
+
+The nightly `content` job runs at 02:00 server time (daily). You can also
+trigger a sync manually from the Integrations page or through the AI assistant.
+See [Background jobs](/reference/background-jobs) for cron details.
+
+**Add by link**
+
+Paste a `news.ycombinator.com/item?id=…` URL to import a single story or
+comment on demand.
+
+## Reddit
+
+Reddit sync uses public RSS feeds. No authentication or API key is required.
+
+**Setup**
+
+1. Open **Settings** for the workspace.
+2. Enter the Reddit username in the **Reddit Username** field.
+3. Make sure **Reddit Enabled** is on (it defaults to on).
+
+**What syncs**
+
+On sync, RsOpsHub re-fetches the RSS feed for each existing Reddit content
+record and refreshes the comment count. RSS does not provide upvote or
+impression data. Only comment counts are synced; upvote and impression fields
+remain at zero unless manually edited.
+
+**Sync schedule**
+
+Reddit content is refreshed as part of the nightly `content` job at 02:00
+server time. Manual sync is available from the Integrations page.
+
+**Add by link**
+
+Paste any `reddit.com/r/…/comments/…` URL (post or comment permalink) to
+import it. The RSS feed surfaces roughly the latest 25 comments on a post.
+
+## dev.to
+
+dev.to sync can run without authentication (public articles only) or with an
+API key (includes drafts and page-view counts).
+
+**Setup**
+
+1. Open **Settings** for the workspace.
+2. Enter the dev.to username in **dev.to Username**.
+3. Optionally paste a dev.to API key. The key is encrypted at rest.
+4. Make sure **dev.to Enabled** is on (it defaults to on).
+
+When an API key is provided, RsOpsHub calls `/articles/me/all` for the primary
+username, which returns drafts and per-article `page_views_count`. Without a
+key, only the public `/articles?username=…` endpoint is used.
+
+**What syncs**
+
+Each article is stored as a `ContentRecord` with its full Markdown body. Synced
+titles are prefixed with `Repurpose:` as a workflow signal. Metrics synced:
+positive reactions (upvotes), comment count, and page views (authenticated
+only).
+
+**Sync schedule**
+
+Runs daily as part of the `content` job at 02:00. Two passes occur: new
+articles are pulled first, then metrics on existing articles are refreshed.
+
+**Add by link**
+
+Paste a `dev.to/<user>/<slug>` URL to import a single article. If an API key is
+configured, page-view analytics are merged from the authenticated endpoint.
+
+## Linear
+
+Linear integration uses a personal API key to read and write issues through the
+Linear GraphQL API.
+
+**Setup**
+
+1. Create a personal API key in your Linear account settings.
+2. Open the workspace **Integrations** page in RsOpsHub.
+3. Paste the API key. It is encrypted at rest.
+4. Make sure **Linear Enabled** is on (it defaults to on).
+
+**What syncs**
+
+Sync pulls your viewer identity, teams, issues (viewer-scoped, up to 2000
+issues plus team-wide pages bounded to 4 pages), notifications, and issue
+templates. Data is upserted into local `LinearTeam`, `LinearIssue`,
+`LinearIssueTemplate`, and `Notification` rows.
+
+**Write operations**
+
+The owner can create issues, update issues, archive issues, create comments, and
+assign issues. These operations call the Linear GraphQL API directly with the
+stored API key.
+
+**Sync schedule**
+
+Linear sync runs as part of the nightly `notifications` job at 02:30 server
+time. You can also trigger it manually or through the AI assistant.
+
+## Notion
+
+Notion uses a single global internal-integration token shared across all
+workspaces. Each workspace narrows its view with a parent page ID.
+
+**Setup**
+
+1. Create a Notion internal integration and copy its token.
+2. Set the `NOTION_TOKEN` environment variable on the server.
+3. In each workspace's settings, paste the Notion parent page ID or URL into the
+   **Notion Parent Page ID** field.
+4. In Notion, open the parent page, click the **...** menu, choose
+   **Connections**, and add your integration so it can access that page tree.
+
+**What it does**
+
+Notion pages are fetched on demand, not synced on a schedule. Operations
+include: search pages, fetch page content (recursive, max depth 5, roughly 500
+block cap), create pages, update/append/delete blocks, list and create
+comments, and archive pages.
+
+**Limitation**
+
+Because the token is global, all workspaces share the same Notion API
+connection. The parent page ID controls which pages appear in each workspace's
+list, but the underlying access is shared.
+
+## Google (Docs, Sheets, Calendar, Meet)
+
+Google integration uses per-workspace OAuth. The OAuth client credentials are
+set as environment variables, and each workspace goes through a consent flow to
+obtain its own refresh token.
+
+**Setup**
+
+1. Create an OAuth 2.0 web-application client in the Google Cloud Console.
+2. Set `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` as environment
+   variables.
+3. Add your `APP_URL` callback path as an authorized redirect URI in the Google
+   Cloud Console: `<your APP_URL>/api/integrations/google/callback`.
+4. In the workspace **Integrations** page, click **Connect Google**. This
+   redirects to Google consent, then back to RsOpsHub.
+
+The OAuth flow requests these scopes: `drive`, `documents`,
+`calendar.events`, `userinfo.email`, and `openid`. The refresh token is stored
+encrypted at rest.
+
+**What it does**
+
+- **Docs and Sheets**: list files in a configured Drive folder, create new
+  Google Docs, list shared-with-me documents, trash files, and fetch metadata.
+- **Calendar**: fetch events from the primary calendar. Google Calendar events
+  are queried live and are not stored in the local database.
+- **Meet**: create a calendar event with an attached Google Meet link.
+
+**Disconnect**
+
+Use the **Disconnect Google** button on the Integrations page, or call
+`POST /api/integrations/google/disconnect`.
+
+## PostHog
+
+PostHog integration queries your PostHog project in real time using HogQL. No
+data is stored locally.
+
+**Setup**
+
+1. Create a personal API key in PostHog with at least the `query:read` scope.
+2. Open the workspace **Integrations** page.
+3. Enter your API key, project ID, and optionally a custom host URL.
+4. Make sure **PostHog Enabled** is on (it defaults to on).
+
+The default host is `https://us.posthog.com`. EU projects should use
+`https://eu.posthog.com`. Custom hosts must use HTTPS and resolve to a public
+address.
+
+**What it shows**
+
+- **Traffic by source**: daily pageview counts split by referrer. Referrers are
+  classified into Reddit, Hacker News, dev.to, LinkedIn, Twitter/X, Discord,
+  and other.
+- **Detailed breakdown**: pages, full URLs, referring domains, UTM campaigns,
+  countries, device types, browsers, operating systems, and custom events.
+  Available on the Analytics detailed-breakdown page.
+
+All queries run on demand against the PostHog API. Results are not cached in the
+database.
+
+## Cloudflare
+
+Cloudflare integration queries zone-level analytics through the Cloudflare
+GraphQL API. No data is stored locally.
+
+**Setup**
+
+1. Create a Cloudflare API token with the **Analytics: Read** permission on the
+   target zone.
+2. Open the workspace **Integrations** page.
+3. Enter the API token and zone ID.
+4. Make sure **Cloudflare Enabled** is on (it defaults to on).
+
+**What it shows**
+
+Zone-level traffic metrics: requests, page views, unique visitors, bytes
+transferred, cached requests/bytes, encrypted requests, and threats. Breakdowns
+by country, HTTP status class, browser family, protocol version, content type,
+TLS version, IP classification, and threat type.
+
+For a 24-hour range the API returns hourly data points. For longer ranges it
+returns daily data points.
+
+## OpenAI and LiteLLM
+
+The AI features (work-log summaries and the CopilotKit assistant) use a global
+API key, not a per-workspace credential.
+
+**Setup**
+
+Set one of the following environment variable combinations:
+
+- `OPENAI_API_KEY` for direct OpenAI access. The CopilotKit assistant uses
+  model `gpt-4o-mini`. Work-log summaries also use `gpt-4o-mini`.
+- `LITELLM_API_KEY` and `LITELLM_BASE_URL` as a fallback when `OPENAI_API_KEY`
+  is not set. CopilotKit uses model `evals-openai/gpt-4o` through the LiteLLM
+  endpoint. Work-log summaries use `evals-openai/gpt-4o-mini`.
+
+When neither key is set, the CopilotKit assistant loads an empty adapter (no AI
+responses), and work-log summaries fall back to deterministic text.
+
+See [AI assistant](/guides/ai-assistant) for details on what the assistant can
+do.
+
+## Sync schedule summary
+
+Content syncs run on a daily schedule through an in-process `node-cron`
+scheduler (self-hosted) or the `/api/cron` endpoint (serverless).
+
+| Time (server) | Job | Integrations |
+|---|---|---|
+| 02:00 | `content` | Hacker News, Reddit, dev.to |
+| 02:30 | `notifications` | Linear sync, Google Drive shared-doc offers, overdue-task scan |
+| 03:00 | `worklog` | Work-log backfill (no external integration) |
+
+Each job has a 15-minute budget. On serverless deployments the budget is 260
+seconds (within the 300-second max duration). The `/api/cron` endpoint requires
+a `CRON_SECRET` bearer token.
+
+You can scope a cron run to specific jobs or a single workspace with query
+parameters. See [Background jobs](/reference/background-jobs) for details.

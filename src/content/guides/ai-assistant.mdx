@@ -1,0 +1,111 @@
+---
+title: AI Assistant
+description: CopilotKit-powered assistant that creates tasks, syncs content, schedules meetings, and queries analytics through natural language.
+---
+
+The in-app assistant lets you drive RsOpsHub with plain language instead of navigating screens and filling forms. Ask it to create a task, sync your dev.to articles, check today's meetings, or show analytics for the last week, and it runs the action, renders the result inline, and links to the created entity.
+
+The assistant is built on CopilotKit. The runtime is self-hosted at `POST /api/copilotkit`, so no CopilotKit API key is needed. All UI (launcher, panel, message bubbles, tool cards, charts) is custom and uses the product's design tokens.
+
+## Open the assistant
+
+- Click the floating button in the bottom-right corner of any workspace page.
+- Press `Cmd+J` (macOS) or `Ctrl+J` (Windows/Linux) to toggle the panel. `Escape` closes it.
+- Type a request and press `Enter`. `Shift+Enter` inserts a newline. The stop button cancels a streaming response.
+- The panel header includes a button to start a fresh conversation.
+
+The assistant is available to both owners and viewers in every workspace.
+
+## Prerequisites
+
+Set `OPENAI_API_KEY` in the environment. Without it, the launcher still appears but the runtime cannot generate responses. As a fallback, you can set `LITELLM_API_KEY` and `LITELLM_BASE_URL` to point at a LiteLLM-compatible endpoint instead.
+
+When `OPENAI_API_KEY` is set the runtime uses `gpt-4o-mini`. When only `LITELLM_API_KEY` is set it uses `evals-openai/gpt-4o` via the configured base URL. When neither key is set the runtime loads an empty adapter.
+
+See [Configuration](/configuration) for the full environment variable reference.
+
+## Available tools
+
+### Read tools
+
+Available to both owners and viewers.
+
+| Tool | What it does |
+|---|---|
+| `showAnalytics` | Fetches tasks, content, and engagement metrics for the last N days (1 to 90) and renders charts with a trend summary. |
+| `listMeetings` | Lists upcoming meetings from the connected Google Calendar with Join Meet and Open in Calendar links. |
+| `contentFeedback` | Summarizes community feedback (comments, praise, criticism) on Reddit, Hacker News, and dev.to posts for a given month. Can be scoped to a single platform. |
+| `navigate` | Opens a section of the current workspace (home, content, tasks, work, hours, calendar, documents, sheets, analytics, notifications, integrations, or settings). |
+
+### Write tools
+
+Available to owners only. When a viewer requests a write action, the assistant refuses and explains the access is read-only.
+
+| Tool | What it does |
+|---|---|
+| `createTask` | Creates a local task. Infers title, priority, status, and resolves relative deadlines against today's date. |
+| `updateTaskStatus` | Moves an existing task to a new status (done, blocked, reopened, and so on). |
+| `updateTask` | Edits any field of an existing task: title, description, priority, status, or due date. Only the provided fields change. |
+| `deleteTask` | Stages deletion of a single task. A confirmation card appears and requires typing `yes` before anything is removed. |
+| `deleteTasks` | Stages deletion of multiple tasks in one request. A single confirmation card lists all affected tasks and requires one click to proceed. |
+| `setHourTracking` | Enables or disables hour tracking for the workspace. The assistant confirms in chat before calling the action. |
+| `createDocument` | Creates a local note, a Notion page, or a Google Doc depending on the chosen provider. Returns the real URL for external documents. |
+| `syncDocuments` | Pulls the latest documents from connected Notion and Google Docs into the workspace. |
+| `syncContent` | Syncs the Content page sources: Hacker News, Reddit, dev.to, or all three. |
+| `syncLinear` | Pulls the latest issues from the connected Linear account. |
+| `createMeeting` | Creates a Google Calendar event with a Meet link and emails invites to attendees. Requires Google connected. |
+| `createLinearIssue` | Creates a Linear issue on the workspace's default team and returns the issue URL. Requires Linear connected. |
+| `assignLinearIssue` | Assigns a Linear issue (by identifier such as `ENG-123`) to a person by name, email, or `me`. Requires Linear connected. |
+
+Created or updated entities render an Open button using the real link the tool returned.
+
+Integration-backed tools (Google, Notion, Linear) require that integration to be connected for the workspace. When it is not, the assistant relays the error and tells you to connect it in Settings. See [Integrations](/guides/integrations) for setup.
+
+## Deletion confirmation
+
+Destructive actions never execute on the model's say-so alone. Both `deleteTask` and `deleteTasks` only stage the deletion. The inline card blocks execution until you confirm:
+
+- **Single delete** shows a text input that requires typing `yes` and clicking Delete.
+- **Bulk delete** lists every affected task and requires clicking a single Delete button.
+
+## Permission model
+
+Viewers are strictly read-only. This is enforced in three independent layers:
+
+1. **System prompt.** For viewers the assistant's system prompt switches to an explicit read-only instruction, and write tool handlers immediately return a denial message so the model always gets a resolved result.
+2. **Server actions.** Every write action calls `requireOwner()` and returns a 403 for viewers. Read actions use `requireWorkspaceAccess()`, which lets owners through unconditionally and viewers through only for a workspace they hold a valid access-code join for.
+3. **Runtime route.** `POST /api/copilotkit` rejects unauthenticated requests, enforces same-origin checks, and applies a per-IP rate limit of 40 requests per minute.
+
+A viewer can ask about analytics, open tasks, upcoming meetings, or content feedback and get answers. Any create, update, delete, sync, assign, or schedule request is refused at both the client and server layers.
+
+## Grounding context
+
+Each turn the model receives live, read-only context via `useCopilotReadable`:
+
+- **Workspace info**: slug, name, whether hour tracking is enabled, and today's date (for resolving relative deadlines).
+- **Open tasks**: up to 25 tasks that are not done or canceled, with ID, title, status, priority, due date, and description.
+- **Recent tasks**: up to 50 tasks of any status including done and canceled, so the model can resolve references to completed work.
+- **Task counts by status**: a summary object the model can cite without querying.
+
+## Security
+
+- **Authentication**: the runtime route rejects requests without a valid session, so the OpenAI key is never exposed to anonymous traffic.
+- **CSRF**: `requireSameOrigin()` blocks cross-site requests. A page on another origin cannot drive the model using a logged-in user's cookie.
+- **Rate limiting**: a per-IP sliding window of 40 requests per minute caps cost and abuse.
+- **Input validation**: every server action validates its input with Zod (length caps on titles and bodies, enumerated statuses, clamped analytics windows) before touching Prisma or an external API.
+- **No fabricated side effects**: the model is instructed to never claim success or produce links unless a tool returned `ok: true`. Integration tools relay the real error when a provider is not connected.
+- **Data isolation**: the assistant calls the same services the rest of the app uses. It has no raw database access and cannot reach another workspace's data.
+
+## Extending the assistant
+
+To add a new tool:
+
+1. **Add a server action.** For writes, call `requireOwner()` at the top. For reads, call `requireWorkspaceAccess()`. Validate input with Zod, call the existing service layer, call `revalidatePath`, and return an object with an `ok` boolean.
+
+2. **Register a client action.** Call `useCopilotAction` with a clear `description`, typed `parameters`, a `handler` that calls the server action, and `available: writeAvail` for write tools so viewer-mode handlers return a denial.
+
+3. **Register a render card.** Call `registerToolRender` with the action name and a render function that returns a card component. For destructive actions, have the handler only stage the operation and use a confirmation card pattern.
+
+4. **Add grounding context (optional).** If the model needs new live data, add a `useCopilotReadable` with a description and the value.
+
+The new tool is immediately accessible through natural language with no further UI changes.

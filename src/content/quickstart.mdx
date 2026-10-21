@@ -1,47 +1,104 @@
 ---
 title: Quickstart
-description: Guide a new reader through one useful workflow and show them how to verify it.
+description: Go from a fresh clone to a running local dev server with a workspace ready to use.
 ---
 
-A strong quickstart produces one meaningful result. Replace the placeholders
-below with the shortest supported path for your product.
+## Prerequisites
 
-## Before you begin
+- **Node.js 20+**
+- **[Bun](https://bun.sh)** (used for installing dependencies and running scripts)
+- **PostgreSQL 14+**, running locally or on a managed host such as Neon or Supabase
 
-List only the requirements needed for this workflow:
+### Install PostgreSQL
 
-- An account or credential, when required
-- A supported runtime, device, browser, or operating system
-- Permission to create or change the resource used in the example
+If you already have a running PostgreSQL instance, skip ahead.
+
+**macOS (Homebrew)**
+
+```bash
+brew install postgresql@17
+brew services start postgresql@17
+createdb rsopshub
+```
+
+**Linux (Debian / Ubuntu)**
+
+```bash
+sudo apt update
+sudo apt install postgresql postgresql-contrib
+sudo systemctl start postgresql
+sudo -u postgres createdb rsopshub
+```
+
+**Windows (EDB installer)**
+
+Download the installer from [postgresql.org/download/windows](https://www.postgresql.org/download/windows/), run it, and use pgAdmin or the SQL Shell to create a database called `rsopshub`.
 
 <Steps>
-  <Step title="Install the required tool">
-    Give readers one recommended installation command.
-
+  <Step title="Clone and install">
     ```bash
-    npm install your-package
+    git clone <repo-url> rsopshub
+    cd rsopshub
+    bun install
     ```
   </Step>
-  <Step title="Add the minimum configuration">
-    Include only the values needed for the first successful run.
+  <Step title="Configure environment variables">
+    ```bash
+    cp .env.example .env
+    ```
+
+    Open `.env` and fill in the six required values:
+
+    | Variable | What to set |
+    |---|---|
+    | `DATABASE_URL` | PostgreSQL connection string, for example `postgresql://postgres:secret@localhost:5432/rsopshub?schema=public` |
+    | `OWNER_EMAIL` | Your email address (the only account that can sign in as owner) |
+    | `OWNER_PASSWORD` | A strong passphrase, at least 12 characters |
+    | `SESSION_SECRET` | At least 32 random characters (used to sign session cookies) |
+    | `TOKEN_ENC_KEY` | At least 32 random characters (AES-GCM key for encrypting stored API tokens) |
+    | `APP_URL` | `http://localhost:3000` for local development |
+
+    You can generate random secrets with:
 
     ```bash
-    your-cli init
+    openssl rand -base64 48
     ```
-  </Step>
-  <Step title="Complete the first task">
-    Use a realistic example that produces an observable result.
 
-    ```bash
-    your-cli start
-    ```
+    Every other variable in `.env.example` is optional. Integrations such as Notion, Google, and Linear stay disabled until you add their credentials later.
   </Step>
-  <Step title="Verify the result">
-    State exactly what the reader should see and how to recover when it does not appear.
+  <Step title="Push the database schema">
+    ```bash
+    bunx prisma db push
+    ```
+
+    This creates all tables in your PostgreSQL database. No migration history is needed for a fresh setup.
+  </Step>
+  <Step title="Seed sample workspaces (optional)">
+    ```bash
+    bun run db:seed
+    ```
+
+    The seed script creates two empty workspaces, **Tessl** and **LLMWare**, each with a generated 16-character viewer access code printed to the console. This step is optional. The app handles a fresh, empty database without it, and the welcome screen will prompt you to create your first workspace.
+  </Step>
+  <Step title="Start the dev server">
+    ```bash
+    bun run dev
+    ```
+
+    Open [http://localhost:3000](http://localhost:3000) in your browser. Sign in with the `OWNER_EMAIL` and `OWNER_PASSWORD` you set in `.env`. You should see the home screen with either the seeded workspaces or a prompt to create one.
   </Step>
 </Steps>
 
-## Choose the next task
+## Production build
 
-Link to the guide that naturally follows this result. Avoid ending the reader’s
-journey with a generic list of every feature.
+```bash
+bun run build
+bun run start
+```
+
+`bun run build` generates the Prisma client and produces an optimized Next.js build. `bun run start` serves it on port 3000 by default.
+
+## Next steps
+
+- [Configuration](/configuration) covers every environment variable and what it controls.
+- [Deployment](/guides/deployment) walks through hosting on Vercel, Fly, Railway, and other platforms.
