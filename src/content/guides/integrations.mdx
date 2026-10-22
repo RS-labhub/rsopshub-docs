@@ -3,294 +3,151 @@ title: Integrations
 description: Connect content platforms, project trackers, document providers, analytics services, and an AI assistant to your workspaces.
 ---
 
-RsOpsHub connects to external services at two levels: **global** credentials set
-once as environment variables, and **per-workspace** credentials entered in
-each workspace's Settings or Integrations page. The table below shows which
-scope each integration uses.
+Every external service the application talks to falls into one of two categories. **Per-workspace** integrations live as encrypted credentials on the workspace row, configured from each workspace's `/integrations` page. They never leak across workspaces. **Global** integrations live in environment variables on the server and apply to every workspace — they're for services where the credential is a shared piece of infrastructure (a Notion internal integration token, the Google OAuth app's client id, an OpenAI key) rather than a per-account credential.
 
-| Integration | Credential scope | Credential type |
-|---|---|---|
-| Hacker News | Per-workspace | Public handle (no secret) |
-| Reddit | Per-workspace | Public handle (no secret) |
-| dev.to | Per-workspace | Public handle, optional API key (encrypted at rest) |
-| Linear | Per-workspace | Personal API key (encrypted at rest) |
-| Notion | Global env var + per-workspace page ID | Internal integration token |
-| Google (Docs, Sheets, Calendar, Meet) | Global env vars + per-workspace OAuth | OAuth client ID/secret (env), refresh token (encrypted at rest) |
-| PostHog | Per-workspace | Personal API key + project ID (encrypted at rest) |
-| Cloudflare | Per-workspace | API token + zone ID (encrypted at rest) |
-| OpenAI / LiteLLM | Global env var | API key |
-
-All secrets stored in the database are encrypted with AES-256-GCM using the
-`TOKEN_ENC_KEY` environment variable. Rotating that key invalidates every stored
-token.
+This document covers each integration end-to-end: what setup the user has to do, what the app actually does with the credential, what gets synced into Postgres, and what stays at the source. Read top to bottom on first setup; on day-to-day operation only the per-workspace section is interesting.
 
 ## Hacker News
 
-Hacker News sync uses the public Firebase API. No API key is needed.
+**Setup**: enter your HN username on the integrations page. No API key, no OAuth — Hacker News exposes a public Firebase-backed JSON API that anyone can read with just a username. Comma-separated usernames work too (`rohansrma, tessl`) so you can pull both your personal handle and a company handle into the same workspace.
 
-**Setup**
+**What it syncs**: every story you've ever submitted (becomes `HACKERNEWS_POST` content records, classified as ask / show / post HN based on the title prefix) and every comment you've written (becomes `HACKERNEWS_COMMENT` records grouped under their root story). The "Add by link" button on the content toolbar accepts any HN URL (story or comment) and pulls just that single item.
 
-1. Open **Settings** for the workspace.
-2. Enter one or more HN usernames in the **HN Username** field (comma-separated for multiple users).
-3. Make sure **HN Enabled** is on (it defaults to on).
-
-**What syncs**
-
-The sync walks each user's `submitted` list (up to 200 items per user), fetches
-each item, and upserts a `ContentRecord` row. Comments are aggregated under
-their root story. Items you have soft-deleted in RsOpsHub are not resurrected on
-the next sync.
-
-Synced fields: title, URL, body text, score (upvotes), and descendant comment
-count.
-
-**Sync schedule**
-
-The nightly `content` job runs at 02:00 server time (daily). You can also
-trigger a sync manually from the Integrations page or through the AI assistant.
-See [Background jobs](/reference/background-jobs) for cron details.
-
-**Add by link**
-
-Paste a `news.ycombinator.com/item?id=…` URL to import a single story or
-comment on demand.
+**Sync schedule**: every three hours by the in-process cron. Each run upserts on `(workspaceId, externalId)` so the same item never duplicates; `upvotes` (HN score) and `comments` (descendant count) are refreshed on every sync so the analytics charts stay current.
 
 ## Reddit
 
-Reddit sync uses public RSS feeds. No authentication or API key is required.
+**Setup**: enter your Reddit username (or comma-separated list) on the integrations page. Like HN, no auth required — Reddit's public JSON API gives anonymous access to a user's posts and comments, just with tight rate limits.
 
-**Setup**
+**What it syncs**: posts (`REDDIT_POST`), top-level comments (`REDDIT_COMMENT`), and nested replies (`REDDIT_REPLY`). The score, upvote ratio, comment count, and subreddit are pulled and stored alongside each row. The "Add by link" button accepts any Reddit URL.
 
-1. Open **Settings** for the workspace.
-2. Enter the Reddit username in the **Reddit Username** field.
-3. Make sure **Reddit Enabled** is on (it defaults to on).
-
-**What syncs**
-
-On sync, RsOpsHub re-fetches the RSS feed for each existing Reddit content
-record and refreshes the comment count. RSS does not provide upvote or
-impression data. Only comment counts are synced; upvote and impression fields
-remain at zero unless manually edited.
-
-**Sync schedule**
-
-Reddit content is refreshed as part of the nightly `content` job at 02:00
-server time. Manual sync is available from the Integrations page.
-
-**Add by link**
-
-Paste any `reddit.com/r/…/comments/…` URL (post or comment permalink) to
-import it. The RSS feed surfaces roughly the latest 25 comments on a post.
+**Sync schedule**: refresh runs only on demand because Reddit's anonymous API rate-limits aggressively and there's no operational benefit to polling. Click Sync on the integration card or the content toolbar to refresh; otherwise add new items by link.
 
 ## dev.to
 
-dev.to sync can run without authentication (public articles only) or with an
-API key (includes drafts and page-view counts).
+**Setup**: connect with your dev.to API key from Settings → Extensions on dev.to. Without the key the integration falls back to dev.to's public listing endpoint, which is enough to pull article metadata but not page views, reactions detail, or drafts. With the key you get full analytics. Each workspace stores its own API key encrypted with `TOKEN_ENC_KEY` — there is no global env override.
 
-**Setup**
+**What it syncs**: every published article (and every draft when the API key is connected) as a `BLOG_POST` content record with `platform: DEV_TO`. The article's markdown body, canonical URL, organization publication (if any, stored in `community`), tags, page views, reactions, and comments are all pulled. Titles are prefixed `Repurpose:` so the content table makes it obvious which rows came from dev.to and what they're for.
 
-1. Open **Settings** for the workspace.
-2. Enter the dev.to username in **dev.to Username**.
-3. Optionally paste a dev.to API key. The key is encrypted at rest.
-4. Make sure **dev.to Enabled** is on (it defaults to on).
+**Sync schedule**: once a day at 03:30 by the in-process cron. The schedule runs two passes per workspace: first `syncDevtoForWorkspace` walks newest-first and stops at the first known article (cheap on subsequent runs), then `refreshDevtoForWorkspace` walks every existing row and refreshes the API-driven fields. Refresh only touches articles the workspace's API key owns — articles added by URL from a different author have their metrics left alone so manually-edited values don't get clobbered.
 
-When an API key is provided, RsOpsHub calls `/articles/me/all` for the primary
-username, which returns drafts and per-article `page_views_count`. Without a
-key, only the public `/articles?username=…` endpoint is used.
-
-**What syncs**
-
-Each article is stored as a `ContentRecord` with its full Markdown body. Synced
-titles are prefixed with `Repurpose:` as a workflow signal. Metrics synced:
-positive reactions (upvotes), comment count, and page views (authenticated
-only).
-
-**Sync schedule**
-
-Runs daily as part of the `content` job at 02:00. Two passes occur: new
-articles are pulled first, then metrics on existing articles are refreshed.
-
-**Add by link**
-
-Paste a `dev.to/<user>/<slug>` URL to import a single article. If an API key is
-configured, page-view analytics are merged from the authenticated endpoint.
+The `shares` field is special: dev.to's API does not expose per-article bookmark counts, so the sync never touches `shares`. Whatever you type in the content detail drawer survives every sync indefinitely.
 
 ## Linear
 
-Linear integration uses a personal API key to read and write issues through the
-Linear GraphQL API.
+**Setup**: generate a personal API key in Linear at Settings → API → Personal API keys. Paste it into the Linear integration card on the workspace's integrations page. Each workspace stores its own key encrypted with `TOKEN_ENC_KEY` — no global env override, no shared key.
 
-**Setup**
+**What it syncs**: every Linear team you have access to (becomes `LinearTeam` rows), every issue (`LinearIssue` rows with denormalised state, assignee, labels, due date, parent / sub-issue links so the board renders instantly), every issue template you've defined (`LinearIssueTemplate` rows), and every Linear notification (`Notification` rows with `source: LINEAR` that deep-link into the in-app Linear tab instead of opening linear.app). The sync is idempotent — re-running it never duplicates an issue.
 
-1. Create a personal API key in your Linear account settings.
-2. Open the workspace **Integrations** page in RsOpsHub.
-3. Paste the API key. It is encrypted at rest.
-4. Make sure **Linear Enabled** is on (it defaults to on).
+**Sync schedule**: refresh on demand. Linear's GraphQL API rate-limits per-key, so polling isn't free; the integration runs when the owner clicks Sync on the integration card, when the notifications page is refreshed, or when a new comment is posted from inside the app.
 
-**What syncs**
-
-Sync pulls your viewer identity, teams, issues (viewer-scoped, up to 2000
-issues plus team-wide pages bounded to 4 pages), notifications, and issue
-templates. Data is upserted into local `LinearTeam`, `LinearIssue`,
-`LinearIssueTemplate`, and `Notification` rows.
-
-**Write operations**
-
-The owner can create issues, update issues, archive issues, create comments, and
-assign issues. These operations call the Linear GraphQL API directly with the
-stored API key.
-
-**Sync schedule**
-
-Linear sync runs as part of the nightly `notifications` job at 02:30 server
-time. You can also trigger it manually or through the AI assistant.
-
-## Notion
-
-Notion uses a single global internal-integration token shared across all
-workspaces. Each workspace narrows its view with a parent page ID.
-
-**Setup**
-
-1. Create a Notion internal integration and copy its token.
-2. Set the `NOTION_TOKEN` environment variable on the server.
-3. In each workspace's settings, paste the Notion parent page ID or URL into the
-   **Notion Parent Page ID** field.
-4. In Notion, open the parent page, click the **...** menu, choose
-   **Connections**, and add your integration so it can access that page tree.
-
-**What it does**
-
-Notion pages are fetched on demand, not synced on a schedule. Operations
-include: search pages, fetch page content (recursive, max depth 5, roughly 500
-block cap), create pages, update/append/delete blocks, list and create
-comments, and archive pages.
-
-**Limitation**
-
-Because the token is global, all workspaces share the same Notion API
-connection. The parent page ID controls which pages appear in each workspace's
-list, but the underlying access is shared.
-
-## Google (Docs, Sheets, Calendar, Meet)
-
-Google integration uses per-workspace OAuth. The OAuth client credentials are
-set as environment variables, and each workspace goes through a consent flow to
-obtain its own refresh token.
-
-**Setup**
-
-1. Create an OAuth 2.0 web-application client in the Google Cloud Console.
-2. Set `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` as environment
-   variables.
-3. Add your `APP_URL` callback path as an authorized redirect URI in the Google
-   Cloud Console: `<your APP_URL>/api/integrations/google/callback`.
-4. In the workspace **Integrations** page, click **Connect Google**. This
-   redirects to Google consent, then back to RsOpsHub.
-
-The OAuth flow requests these scopes: `drive`, `documents`,
-`calendar.events`, `userinfo.email`, and `openid`. The refresh token is stored
-encrypted at rest.
-
-**What it does**
-
-- **Docs and Sheets**: list files in a configured Drive folder, create new
-  Google Docs, list shared-with-me documents, trash files, and fetch metadata.
-- **Calendar**: fetch events from the primary calendar. Google Calendar events
-  are queried live and are not stored in the local database.
-- **Meet**: create a calendar event with an attached Google Meet link.
-
-**Disconnect**
-
-Use the **Disconnect Google** button on the Integrations page, or call
-`POST /api/integrations/google/disconnect`.
+Mutations (create issue, update issue, archive, post comment, reply to comment, save template, apply template) are owner-only and go through Linear's API in real time. Viewers see issues, sub-issues, comments, labels, and assignees but cannot create or modify anything.
 
 ## PostHog
 
-PostHog integration queries your PostHog project in real time using HogQL. No
-data is stored locally.
+**Setup**: create a personal API key in PostHog under Settings → Personal API keys with the `query:read` and `project:read` scopes, then paste it into the PostHog card on the workspace's integrations page along with the numeric project id from your PostHog URL (`app.posthog.com/project/12345`). The host field is optional — leave it blank for US cloud, or set `https://eu.posthog.com` or your self-hosted URL. Each workspace stores its own key encrypted with `TOKEN_ENC_KEY`; there is no global env override, so different workspaces can point at entirely different PostHog accounts.
 
-**Setup**
+**What it syncs**: nothing is stored. Traffic is queried live via PostHog's HogQL query API each time an analytics page loads. `$pageview` events are grouped by day and classified into Reddit, Hacker News, dev.to, LinkedIn, X, and Discord purely from `properties.$referring_domain` — no UTM tagging required on your links. Mobile-app referrers are matched too (`com.reddit.frontpage`, `com.linkedin.android`, `com.discord`), and X covers `t.co`, `twitter.com`, and `x.com`. The source list lives in `src/lib/traffic.ts`; adding a new one means adding an entry there plus a branch in the `SOURCE_CASE` multiIf in `src/server/integrations/posthog.ts`.
 
-1. Create a personal API key in PostHog with at least the `query:read` scope.
-2. Open the workspace **Integrations** page.
-3. Enter your API key, project ID, and optionally a custom host URL.
-4. Make sure **PostHog Enabled** is on (it defaults to on).
+**Where it shows up**: the "Referral traffic" panel on the workspace analytics page, the overlaid traffic area on the content analytics chart, and the **Detailed breakdown** page (see below). When PostHog is connected the traffic KPI switches from the stored `contentRecord.traffic` column to the live PostHog sum.
 
-The default host is `https://us.posthog.com`. EU projects should use
-`https://eu.posthog.com`. Custom hosts must use HTTPS and resolve to a public
-address.
-
-**What it shows**
-
-- **Traffic by source**: daily pageview counts split by referrer. Referrers are
-  classified into Reddit, Hacker News, dev.to, LinkedIn, Twitter/X, Discord,
-  and other.
-- **Detailed breakdown**: pages, full URLs, referring domains, UTM campaigns,
-  countries, device types, browsers, operating systems, and custom events.
-  Available on the Analytics detailed-breakdown page.
-
-All queries run on demand against the PostHog API. Results are not cached in the
-database.
+**Gotcha**: HogQL queries default to roughly 100 rows. Long date ranges grouped by day and source blow past that and silently truncate, so the traffic query pins `LIMIT 100000` explicitly.
 
 ## Cloudflare
 
-Cloudflare integration queries zone-level analytics through the Cloudflare
-GraphQL API. No data is stored locally.
+**Setup**: in the Cloudflare dashboard go to My Profile → API Tokens → Create Token, start from a custom token, and grant **Zone · Analytics · Read** scoped to the zone you want to track. Adding **Zone · Zone · Read** is optional but recommended, because it lets the app show the zone's domain name and deep-link into the right dashboard. Copy the 32-character Zone ID from the zone's Overview page (right-hand sidebar), then paste both into the Cloudflare card on the workspace's integrations page. The token is verified against Cloudflare's GraphQL Analytics API before it's saved, encrypted with `TOKEN_ENC_KEY`, and stored on the workspace row. Each workspace can point at a different zone or a different Cloudflare account.
 
-**Setup**
+**What it syncs**: nothing is stored. Edge traffic is queried live from Cloudflare's GraphQL Analytics API (`httpRequests1hGroups` for the last 24 hours, `httpRequests1dGroups` for longer ranges) whenever the breakdown page opens. You get requests, cached requests and cache hit rate, bandwidth, page views, unique visitors, threats, and 4xx / 5xx error rates, plus top countries, response status classes, browsers, HTTP protocols, content types, TLS versions, IP classes, and threat types.
 
-1. Create a Cloudflare API token with the **Analytics: Read** permission on the
-   target zone.
-2. Open the workspace **Integrations** page.
-3. Enter the API token and zone ID.
-4. Make sure **Cloudflare Enabled** is on (it defaults to on).
+**Where it shows up**: the Cloudflare tab of the **Detailed breakdown** page. Cloudflare sees every request that hits the edge (including bots, assets, and visitors who block JavaScript), so its numbers are always higher than PostHog's; the two are meant to be read side by side, not reconciled.
 
-**What it shows**
+The toggle on the card pauses the integration without deleting the token. Disconnecting wipes the token, zone id, and account id from the row.
 
-Zone-level traffic metrics: requests, page views, unique visitors, bytes
-transferred, cached requests/bytes, encrypted requests, and threats. Breakdowns
-by country, HTTP status class, browser family, protocol version, content type,
-TLS version, IP classification, and threat type.
+## Detailed breakdown
 
-For a 24-hour range the API returns hourly data points. For longer ranges it
-returns daily data points.
+The analytics page has a **Detailed breakdown** button on the Referral traffic chart (or on the engagement chart when only Cloudflare is connected). It opens the `/analytics/detailed-breakdown` page, which pulls live data from whichever of PostHog and Cloudflare the workspace has connected, with no extra setup. The page starts on the window closest to the dashboard's date range, and the dashboard's filters, granularity, and chart toggles are restored when you go back.
 
-## OpenAI and LiteLLM
+- **Ranges**: 24 hours, 7 days, 30 days, 90 days. Hourly buckets for 24 hours, daily otherwise.
+- **Filters**: URL path (prefix or exact match), referrer source (`direct` or a domain), country (ISO-2 code), and device type. Filters are validated on the server and passed to HogQL as bound placeholders, never string-interpolated.
+- **Tabs**: Overview (KPIs, pageviews / visitors over time, top pages, sources, countries), Sources (referrers and UTM campaigns), Pages & events (searchable page and full-URL lists, custom events), Audience (countries, devices, browsers, OS), and Cloudflare.
+- **URL drill-down**: click any page or full URL to filter the whole dashboard to that exact path. A banner shows which URL you're looking at, lets you flip between exact and prefix match, and has a one-click "Back to all pages". Full URLs are built from host + path only, so query strings (which can carry tokens) never appear.
 
-The AI features (work-log summaries and the CopilotKit assistant) use a global
-API key, not a per-workspace credential.
+Results are cached in memory per workspace and filter set for five minutes. The Refresh button bypasses the cache, rate-limited to once every 30 seconds per filter set. Viewers can open the breakdown too; it's read-only and gated by `requireWorkspaceAccess`.
 
-**Setup**
+## Notion
 
-Set one of the following environment variable combinations:
+**Setup**: the token is global, the parent page is per-workspace. Create an internal integration at [notion.so/profile/integrations](https://www.notion.so/profile/integrations), give it read access to whatever pages you want mirrored, copy the secret, and put it in `NOTION_TOKEN` in your env. Then, on each workspace that wants Notion documents, paste the parent page ID (or the full page URL) into the Notion card on the workspace's integrations page.
 
-- `OPENAI_API_KEY` for direct OpenAI access. The CopilotKit assistant uses
-  model `gpt-4o-mini`. Work-log summaries also use `gpt-4o-mini`.
-- `LITELLM_API_KEY` and `LITELLM_BASE_URL` as a fallback when `OPENAI_API_KEY`
-  is not set. CopilotKit uses model `evals-openai/gpt-4o` through the LiteLLM
-  endpoint. Work-log summaries use `evals-openai/gpt-4o-mini`.
+**What it syncs**: child pages of the configured parent become `Document` rows with `provider: NOTION`. Clicking a Notion document in the documents list fetches the page's blocks on demand and renders them inline — no need to bounce to Notion.so. Updates inside the app push back to Notion via the REST API when supported (text edits do; tables, embeds, and toggles are read-only at the moment).
 
-When neither key is set, the CopilotKit assistant loads an empty adapter (no AI
-responses), and work-log summaries fall back to deterministic text.
+**Sync schedule**: pull on demand. Notion's API doesn't push so the cheapest model is to fetch the latest blocks each time the user opens the document.
 
-See [AI assistant](/guides/ai-assistant) for details on what the assistant can
-do.
+## Google Docs and Sheets
 
-## Sync schedule summary
+**Setup**: this is partly global, partly per-workspace. The OAuth client itself (the thing that defines what your app is asking permission for) is global — set `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` in env, enable the Drive API, Docs API, Sheets API, and Calendar API in the same Google Cloud project, and authorise the redirect URI `<APP_URL>/api/integrations/google/callback`. Then each workspace owner clicks "Connect Google" on their integrations page, completes the OAuth dance, and the workspace gets its own encrypted refresh token. Each workspace can connect a different Google account.
 
-Content syncs run on a daily schedule through an in-process `node-cron`
-scheduler (self-hosted) or the `/api/cron` endpoint (serverless).
+**What it syncs**: Drive files in the configured folder become `Document` rows for `.gdoc` files and `Spreadsheet` rows for `.gsheet` files. Documents you've been shared on (but don't own) surface as `SharedDocOffer` notifications you can claim into a workspace.
 
-| Time (server) | Job | Integrations |
-|---|---|---|
-| 02:00 | `content` | Hacker News, Reddit, dev.to |
-| 02:30 | `notifications` | Linear sync, Google Drive shared-doc offers, overdue-task scan |
-| 03:00 | `worklog` | Work-log backfill (no external integration) |
+**How the embed works**: owners load Drive's `/edit?embedded=true` URL inside an iframe — the full editable Google Docs / Sheets UI ships with the page, so the owner can type, format, comment, and share without leaving the app. Viewers load `/preview` instead, which is the read-only viewer; `/edit?embedded=true` would force them through a Google sign-in screen.
 
-Each job has a 15-minute budget. On serverless deployments the budget is 260
-seconds (within the 300-second max duration). The `/api/cron` endpoint requires
-a `CRON_SECRET` bearer token.
+**Third-party cookies (important)**: the embed authenticates the owner via cookies on `docs.google.com`. Chrome's default "Block third-party cookies" setting hides those cookies from the iframe, producing **"Allow Google Docs access to your necessary cookies"** or **"Can't access your Google Account"** in place of the editor. There is no server-side fix because the cookie policy is enforced by the browser against Google's own origin, not ours. Each user has to allow third-party cookies for `[*.]google.com` once per browser profile:
 
-You can scope a cron run to specific jobs or a single workspace with query
-parameters. See [Background jobs](/reference/background-jobs) for details.
+1. Open **Chrome → ⋮ → Settings → Privacy and security → Third-party cookies**
+2. Either pick **"Allow third-party cookies"** globally, or
+3. Stay on **"Block third-party cookies"** and click **"Add"** under *Sites allowed to use third-party cookies* — add the pattern `[*.]google.com`. During local development also add `[*.]localhost` (or whatever host `APP_URL` resolves to) so the embed can run cookies for the parent page too.
+
+Refresh the document page after changing the setting — the editable Drive UI loads with the owner's account session.
+
+**Sync schedule**: pull on demand. Click Sync on the documents or sheets page to refresh the Drive folder; click Refresh on the notifications page to scan for new shared-document offers.
+
+## Google Calendar / Google Meet
+
+**Setup**: same Google OAuth flow as Docs / Sheets. The calendar scope (`https://www.googleapis.com/auth/calendar.events`) is requested alongside Drive and Docs scopes. If you connected Google before the calendar scope was added you'll need to disconnect and reconnect once to grant it — the integration shows a clear error message telling you so.
+
+**What it shows**: the upcoming 14-day window of events on your primary Google calendar appears in the Meetings widget on `/home`, capped at six. The widget also displays them inside `/calendar`'s month / week view alongside content. Each row links straight to the Meet conference if one is attached.
+
+**What it does**: owners can create a new event with attendees and a Google Meet conference link from the home widget's "New" button — the event lands on the primary calendar with `conferenceData.createRequest` so Google attaches a Meet link automatically. Optionally send a calendar invite email by ticking the "Email attendees" checkbox in the create dialog. Owners can also edit and cancel events; viewers can only join.
+
+The same widget will swap to Microsoft Teams or Zoom in the future depending on the workspace; the integration code is structured so adding a new provider only requires writing the equivalent of `createMeeting` / `updateMeeting` / `deleteMeeting` against that provider's API. The UI is provider-agnostic.
+
+## OpenAI (work-log summaries)
+
+**Setup**: set `OPENAI_API_KEY` in env. Optional — without it the daily work log falls back to a deterministic template summary (still useful, just less narratively interesting).
+
+**What it does**: every night at 23:55, for each workspace that doesn't already have a manual summary for today, the cron computes the day's activity (tasks done, content created, content published, Linear issues closed) and asks `gpt-4o-mini` to write a one-paragraph summary in the owner's voice. The same call is available on demand via the "Generate" button in the work tracker.
+
+Manual summaries are never overwritten. If you type your own writeup, the cron sees a non-empty summary and skips that workspace for the day.
+
+## Per-workspace versus global summary
+
+A quick reference for which credential lives where:
+
+| Provider | Where the credential lives |
+|---|---|
+| Hacker News (handle) | Per-workspace |
+| Reddit (handle) | Per-workspace |
+| dev.to (API key) | Per-workspace |
+| Linear (API key) | Per-workspace |
+| PostHog (personal API key + project id) | Per-workspace |
+| Cloudflare (API token + zone id) | Per-workspace |
+| Notion (token) | Global env (`NOTION_TOKEN`) |
+| Google OAuth client | Global env (`GOOGLE_OAUTH_CLIENT_ID` + `_SECRET`) |
+| Google refresh token (per account) | Per-workspace |
+| OpenAI (API key) | Global env (`OPENAI_API_KEY`) |
+
+The split exists because some credentials are intrinsically global (the OAuth client identifies your app to Google, not a particular user's account) and others are intrinsically personal (your Linear API key authenticates as you specifically and should never be shared across workspaces that might represent different clients or projects).
+
+## Manual "Add by link"
+
+Independent of any sync, each of Hacker News, Reddit, and dev.to offers a small icon button on the content page toolbar that takes a single URL and adds that one item. Useful for content that the public listing missed, items from accounts other than the one you're syncing, or anything you want to track without setting up a full integration. The button works for all three providers; you don't need to configure anything beyond pasting a URL.
+
+## Provider-agnostic abstractions
+
+A few helpers worth knowing about if you're extending the integrations:
+
+- `gfetch(workspaceId, url, init)` in `server/integrations/google-docs.ts` is the shared Google API client — it manages OAuth token refresh, caches access tokens for ~50 minutes, and surfaces precise error messages (insufficient scope, expired token, API not enabled). Calendar, Docs, Sheets, and Drive all use it.
+- `withLinearKey(workspaceId, fn)` in `server/services/linear-sync.ts` decrypts the workspace's Linear API key once, passes it to the callback, and wraps any error into a consistent shape.
+- `resolveDevtoApiKey(encryptedKey)` returns the decrypted dev.to key for a workspace or null if not connected.
+- `requireSameOrigin(req)` in `server/ratelimit.ts` is the CSRF guard every mutating API route calls.
+
+Add a new integration by following the same shape: store the credential on the workspace row (encrypted if it's sensitive), write a service module under `server/services/` for the sync, expose a server action under `app/(app)/w/[workspace]/integrations/actions.ts` plus optionally a card under `features/integrations/`, and hook the sync into `src/server/cron.ts` if it needs to run on a schedule.

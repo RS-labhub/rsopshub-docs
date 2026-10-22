@@ -1,0 +1,132 @@
+---
+title: Overview
+description: Self-hosted, single-owner operations hub that consolidates content tracking, tasks, work logs, documents, analytics, and integrations in one workspace.
+mode: home
+---
+
+<Hero
+  title="RsOpsHub"
+  subtitle="A self-hosted operations hub for tracking content, tasks, work logs, documents, calendar events, and analytics from one workspace you fully control."
+/>
+
+![rsopshub banner](/banner.png)
+
+RsOpsHub is the operating system for content and work. It is a self-hosted, single-owner workspace that pulls everything an indie operator, technical founder, or content-heavy team relies on into one place: drafted and published posts across Reddit / Hacker News / dev.to, blog drafts and analytics, live site traffic from PostHog and Cloudflare, project work in Linear, documents from Notion and Google Docs, spreadsheets from Drive, daily work logs, and a unified calendar that includes Google Meet meetings created right from the app. There is no public sign-up, no third-party SaaS sitting between you and your data, and no per-seat pricing. You install it once, point your integrations at it, and from then on your daily ops live inside one editorial-looking app you fully control.
+
+## Who it's for
+
+The single-owner shape is deliberate. There is exactly one owner per deployment, defined by `OWNER_EMAIL` + `OWNER_PASSWORD` in your environment. You then invite as many viewers as you want with a 16-character access code per workspace. Owners have full read / write; viewers are read-only by design. The model fits four shapes especially well:
+
+- **Solo operator** running their own startup, content brand, or side project who wants every signal in one place.
+- **Founder + team** where the founder owns ops and the team needs visibility into roadmaps, content cadence, and shipping rhythm without write access.
+- **Agency lead** who needs to share progress with clients in a clean read-only view per client (one workspace per client).
+- **Internal tooling** for a small team that doesn't want to pay enterprise tier prices on five different SaaS dashboards.
+
+If you need multi-owner editing with role-based permissions, RsOpsHub is not the right tool — it intentionally trades the complexity of a multi-tenant identity system for the simplicity of one trusted owner.
+
+## What's in a workspace
+
+| Section          | Purpose                                                          |
+| ---------------- | ---------------------------------------------------------------- |
+| **Home**         | Today's focus + activity heatmap                                 |
+| **Content**      | Reddit / HN / dev.to posts and comments + blog records           |
+| **Tasks**        | Local tasks alongside synced Linear issues                       |
+| **Work**         | Daily work log with AI-generated summaries                       |
+| **Calendar**     | Month / week view of scheduled + published content               |
+| **Documents**    | Local notes + mirrored Notion pages + Google Docs                |
+| **Sheets**       | Local files + Google Sheets                                      |
+| **Analytics**    | Engagement charts, referral traffic, PostHog + Cloudflare breakdown |
+| **Notifications**| In-app inbox for Linear, Google share offers, internal events    |
+| **Settings**     | Identity, access code, viewer joins, integration IDs             |
+| **Integrations** | Per-workspace API keys + sync controls                           |
+
+### At a glance
+
+One table for the whole picture. The four tables after it break each row down into individual capabilities.
+
+| Area | RsOpsHub | Notion | ClickUp | Sunsama / Akiflow | Buffer / Typefully | PostHog / Plausible |
+|---|---|---|---|---|---|---|
+| Track Reddit, Hacker News, and dev.to posts with metrics | yes | no | no | no | no | no |
+| Write and auto-publish posts to social networks | no | no | no | no | yes | no |
+| Tasks together with Linear issues | yes | partial | partial | yes | no | no |
+| Daily work log and hours tracking | yes | partial | partial | partial | no | no |
+| Calendar with in-app Google Meet | yes | partial | partial | partial | partial | no |
+| Docs and sheets (Notion, Google Docs, Google Sheets) | yes | partial | partial | no | no | no |
+| Referral traffic tied to the post that sent it | yes | no | no | no | partial | yes |
+| URL-level analytics and Cloudflare edge data | yes | no | no | no | no | partial |
+| Funnels, session replay, experiments | no | no | no | no | no | yes |
+| AI assistant that acts on your data | yes | yes | yes | no | partial | partial |
+| Read-only viewers with no per-seat cost | yes | partial | partial | no | no | partial |
+| Separate integration accounts per client workspace | yes | partial | partial | no | partial | partial |
+| Self-hosted, data in your own Postgres | yes | no | no | no | no | yes |
+| Pricing shape | your own infra | per seat | per seat | per user | per channel / user | usage or pageviews |
+| Best at | running content, work, and traffic from one screen | team wikis and docs | team project management | daily planning | scheduling social posts | product analytics |
+
+Reading down the RsOpsHub column, the only "no" rows are things it deliberately leaves to other tools: it doesn't publish posts for you and it doesn't do product experimentation. Every other column has far more "no" and "partial" rows, because each of those tools is built around one slice.
+
+### Content and distribution
+
+| Capability | RsOpsHub | Notion | ClickUp | Sunsama / Akiflow | Buffer / Typefully | PostHog / Plausible |
+|---|---|---|---|---|---|---|
+| Reddit and Hacker News posts + comments mirrored with metrics | yes | no | no | no | no | no |
+| dev.to articles mirrored with views, reactions, and comments | yes | no | no | no | no | no |
+| Idea → draft → scheduled → published pipeline (table, kanban, calendar) | yes | partial | partial | no | yes | no |
+| Add any post by pasting its link | yes | no | no | no | no | no |
+| Writing and auto-publishing posts to social networks | no | no | no | no | yes | no |
+
+### Work and planning
+
+| Capability | RsOpsHub | Notion | ClickUp | Sunsama / Akiflow | Buffer / Typefully | PostHog / Plausible |
+|---|---|---|---|---|---|---|
+| Local tasks and Linear issues in one place | yes | partial | partial | yes | no | no |
+| Full Linear editing (sub-issues, comments, templates) without leaving the app | yes | no | no | partial | no | no |
+| Daily work log written by AI from what actually happened | yes | partial | partial | partial | no | no |
+| Manual hours tracking | yes | partial | yes | yes | no | no |
+| One calendar for content + meetings, Google Meet created in-app | yes | partial | partial | partial | partial | no |
+| Notion pages, Google Docs, and Google Sheets side by side | yes | partial | partial | no | no | no |
+
+### Analytics
+
+| Capability | RsOpsHub | Notion | ClickUp | Sunsama / Akiflow | Buffer / Typefully | PostHog / Plausible |
+|---|---|---|---|---|---|---|
+| Engagement charts across Reddit, HN, and dev.to | yes | no | no | no | partial | no |
+| Referral traffic attributed to the platform that sent it | yes | no | no | no | partial | yes |
+| URL-level drill-down (sources, countries, devices per page) | yes | no | no | no | no | yes |
+| Cloudflare edge data (requests, cache, threats) next to product analytics | yes | no | no | no | no | no |
+| Content metrics, site traffic, and shipped work on one timeline | yes | no | no | no | no | no |
+| Funnels, session replay, feature flags, experiments | no | no | no | no | no | yes |
+
+### AI, sharing, and ownership
+
+| Capability | RsOpsHub | Notion | ClickUp | Sunsama / Akiflow | Buffer / Typefully | PostHog / Plausible |
+|---|---|---|---|---|---|---|
+| AI assistant that acts on your data, not just writes text | yes | yes | yes | no | partial | partial |
+| Read-only viewers with no per-seat cost | yes | partial | partial | no | no | partial |
+| Different integration accounts per client workspace, one login | yes | partial | partial | no | partial | partial |
+| Self-hostable, data in your own Postgres | yes | no | no | no | no | yes |
+| Pricing shape | your own infra | per seat | per seat | per user | per channel / user | usage or pageviews |
+
+### When something else is the better pick
+
+- You need many people editing the same docs and wikis: use **Notion**.
+- You need sprints, Gantt charts, and permissions for a whole team of editors: use **ClickUp** or **Linear** directly.
+- You want a guided time-blocking ritual every morning: use **Sunsama** or **Akiflow**.
+- You want to write threads and have them published on a schedule: use **Buffer** or **Typefully**. RsOpsHub tracks what you published; it doesn't post for you.
+- You need funnels, session replay, or A/B tests: use **PostHog** itself. RsOpsHub reads PostHog and Cloudflare for the questions an operator asks every day, and links out to them for the deep product analytics.
+
+## How to get access
+
+RsOpsHub is not available as a public download or a hosted SaaS. To get a deployment running for yourself or your team, reach out to the author **Rohan Sharma** at [rohansrma.me](https://rohansrma.me) — include a sentence on what you'd use it for and the size of your team, and you'll get the codebase, a setup walkthrough, and ongoing support.
+
+If those trade-offs are fine and you've got access, keep reading. The [Setup guide](/setup) gets you from a clone to a running local dev server in under ten minutes.
+
+## Next steps
+
+<CardGroup cols="2">
+  <Card title="Setup" icon="rocket" href="/setup">
+    Go from a fresh clone to a running local dev server.
+  </Card>
+  <Card title="Deployment" icon="settings" href="/deployment">
+    Deploying options on multiple platforms with full configuration.
+  </Card>
+</CardGroup>

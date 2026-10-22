@@ -18,7 +18,7 @@
   "navbar": {
     "primary": {
       "label": "Get started",
-      "href": "/quickstart"
+      "href": "/overview"
     }
   },
   "tabs": [
@@ -28,31 +28,16 @@
         {
           "group": "Getting Started",
           "pages": [
-            "introduction",
-            "quickstart",
-            "configuration"
+            "overview",
+            "setup",
+            "deploy"
           ]
         },
         {
           "group": "Guides",
           "pages": [
-            "guides/deployment",
             "guides/integrations",
             "guides/ai-assistant"
-          ]
-        },
-        {
-          "group": "API Reference",
-          "pages": [
-            "api/authentication",
-            "api/routes"
-          ]
-        },
-        {
-          "group": "Reference",
-          "pages": [
-            "reference/data-model",
-            "reference/background-jobs"
           ]
         },
         {
