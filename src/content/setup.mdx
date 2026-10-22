@@ -164,8 +164,8 @@ If the dev server boots but the integrations don't work, look at the warning the
 
 If you uploaded an `OWNER_PASSWORD` that was less than 12 characters and the app is refusing to boot in production, change it in env, restart, and the next sign-in will work. Already-issued sessions die when `OWNER_PASSWORD` changes because the session fingerprint stops matching.
 
-If Google Docs / Sheets embeds show **"Allow Google Docs access to your necessary cookies"** or **"Can't access your Google Account"**, Chrome's third-party cookie block is hiding the `docs.google.com` session from the iframe. Open **Chrome → ⋮ → Settings → Privacy and security → Third-party cookies** and add `[*.]google.com` to *Sites allowed to use third-party cookies*. During local development also add `[*.]localhost` (or whatever host you run the dev server on) so the parent page's cookies aren't blocked either. See [integrations.md → Google Docs and Sheets](/integrations#google-docs-and-sheets) for the full rationale.
+If Google Docs / Sheets embeds show **"Allow Google Docs access to your necessary cookies"** or **"Can't access your Google Account"**, Chrome's third-party cookie block is hiding the `docs.google.com` session from the iframe. Open **Chrome → ⋮ → Settings → Privacy and security → Third-party cookies** and add `[*.]google.com` to *Sites allowed to use third-party cookies*. During local development also add `[*.]localhost` (or whatever host you run the dev server on) so the parent page's cookies aren't blocked either. See [integrations.md → Google Docs and Sheets](/guides/integrations#google-docs-and-sheets) for the full rationale.
 
 ## Next steps
 
-[Deployment](/deployment) walks through hosting on Vercel, Fly, Railway, and other platforms.
+[Deployment](/deploy) walks through hosting on Vercel, Fly, Railway, and other platforms.
