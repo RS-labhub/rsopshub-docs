@@ -1,0 +1,111 @@
+---
+title: AI Assistant
+description: CopilotKit-powered assistant that creates tasks, syncs content, schedules meetings, and queries analytics through natural language.
+---
+
+The assistant turns the app into something you can drive with plain language. Instead of clicking into a screen, filling a form, and hitting save, you tell the assistant what you want — "add a task to prepare the Q3 investor update by next Friday", "do I have meetings today?", "show me analytics for the last three days", "sync the dev.to articles" — and it runs the action, asks a follow-up only when something genuinely can't be inferred, and shows the result inline (a task card, a chart, a meetings list, a confirmation).
+
+It's built on [CopilotKit](https://copilotkit.ai) over the **AG-UI** protocol for tool calling and streaming, but every pixel of the UI is our own — there's no third-party widget styling anywhere. The launcher, panel, message bubbles, tool cards, and charts all use the product's design tokens.
+
+## Where AG-UI is used
+
+AG-UI (the Agent–UI event/message protocol CopilotKit speaks) is the contract between the browser and the runtime. We use it in two concrete places:
+
+1. **The message stream.** We render the conversation off `useCopilotChatInternal()`, whose `messages` are **AG-UI messages** — plain objects with `role: "user" | "assistant" | "tool"`, optional `content`, and `toolCalls` on assistant turns. Our renderer ([`use-rendered-messages.tsx`](../src/features/assistant/use-rendered-messages.tsx)) walks that AG-UI list and pairs each assistant `toolCall` with its `tool` result message (by `toolCallId`) to drive the card's `inProgress → executing → complete` state.
+2. **Tool calls.** Each `useCopilotAction` is exposed to the model as an AG-UI tool. When the model calls one, the runtime emits an AG-UI tool-call event, our handler runs the server action, and the result is streamed back as an AG-UI `tool` message — which our renderer turns into a card.
+
+> Note on the headless hook: in this CopilotKit build (`1.60.2`) the public `useCopilotChat()` wrapper exposes a `visibleMessages` field that is empty, so we use `useCopilotChatInternal()` (open-source, no API key) which returns the real AG-UI `messages`. We do **not** use `@copilotkit/react-ui` — the entire UI is hand-built so it matches the product. Because of that, tool cards aren't auto-rendered for us; we keep a small render registry ([`render-registry.tsx`](../src/features/assistant/render-registry.tsx)) that maps each action name to its card.
+
+## How it's wired
+
+The flow of a single turn:
+
+1. The browser provider (`<CopilotKit runtimeUrl="/api/copilotkit">`) streams the conversation over **AG-UI** to the runtime route.
+2. The route (`CopilotRuntime` + `OpenAIAdapter`) calls **OpenAI** (`gpt-4o-mini`) with the registered tools and the readable context.
+3. If the model calls a tool, the runtime sends an AG-UI **tool-call** back to the browser; our handler runs the matching **owner-gated server action**.
+4. The action's result streams back as an AG-UI **tool** message, which our renderer turns into a **card** in the panel.
+
+The pieces:
+
+- **`/api/copilotkit`** ([route.ts](../src/app/api/copilotkit/route.ts)) — a single Next.js route hosting the `CopilotRuntime`. Uses `OpenAIAdapter` (`gpt-4o-mini`) when `OPENAI_API_KEY` is set, and an empty adapter otherwise so the build never breaks when the key is missing. See **Security** below for the request guards.
+- **The provider** ([assistant.tsx](../src/features/assistant/assistant.tsx)) — wraps the workspace UI in `<CopilotKit>` pointed at that route. Mounted once per workspace from the workspace layout for **both owners and viewers**, with a `canWrite` flag derived from the session role. Rendered client-only (after mount) to avoid SSR hydration mismatches.
+- **The UI** — [`assistant-launcher.tsx`](../src/features/assistant/assistant-launcher.tsx) (floating circular button, CopilotKit mark), [`assistant-panel.tsx`](../src/features/assistant/assistant-panel.tsx) (the conversational panel on the headless hook), and the cards in [`assistant-cards.tsx`](../src/features/assistant/assistant-cards.tsx) / [`assistant-analytics-card.tsx`](../src/features/assistant/assistant-analytics-card.tsx).
+- **The tools** — [`use-assistant-actions.tsx`](../src/features/assistant/use-assistant-actions.tsx) registers every front-end action plus the readable context. This is the extensibility seam.
+- **The server actions** — [`assistant/actions.ts`](<../src/app/(app)/w/[workspace]/assistant/actions.ts>) — owner-gated writes and access-checked reads. They reuse the same services the rest of the app uses, so the assistant can never do something a normal screen can't.
+
+## What it can do today
+
+| Action | Type | What happens |
+| --- | --- | --- |
+| `showAnalytics` | read | Fetches tasks/content/engagement for the last N days and renders charts + a short trend summary. |
+| `listMeetings` | read | Lists upcoming meetings from the connected Google Calendar (with Join Meet / Open in Calendar links). |
+| `createTask` | write | Creates a local task; infers title, priority, status, and resolves relative deadlines. |
+| `updateTaskStatus` | write | Moves a task to a new status (done / blocked / reopened). |
+| `deleteTask` | write | Deletes a task — **only after you type `yes`** in a confirmation card. |
+| `createDocument` | write | Creates a local note, or a real Notion / Google Doc when that integration is connected; returns the real URL. |
+| `syncDocuments` | write | Pulls latest docs from connected Notion / Google. |
+| `syncContent` | write | Syncs the Content page sources — Hacker News, Reddit, or dev.to (or all). |
+| `createMeeting` | write | Creates a Google Calendar event with a Meet link and emails invites to attendees. |
+| `createLinearIssue` | write | Creates a Linear issue on the workspace's default team; returns the issue URL. |
+| `assignLinearIssue` | write | Assigns a Linear issue (`ENG-123`) to a person by name/email or `me`. |
+| `syncLinear` | write | Pulls the latest issues from the connected Linear account. |
+| `navigate` | nav | Opens a section of the workspace. |
+
+Created/updated entities (tasks, docs, meetings, Linear issues) render an **Open** button using the real link the tool returned — never a fabricated one.
+
+### Deletion is double-confirmed
+
+Destructive actions don't execute on the model's say-so. `deleteTask` only *stages* the delete; the card requires you to **type `yes`** and click **Delete** before anything is removed (`DeleteConfirmCard` in [`assistant-cards.tsx`](../src/features/assistant/assistant-cards.tsx)). This pattern is reusable for any future destructive tool.
+
+## Permissions — owners vs viewers
+
+The assistant is available to everyone, but **viewers are strictly read-only**, enforced in three independent layers (defense in depth):
+
+1. **Client tools.** Write tools are registered with `available: "disabled"` for viewers, so the model isn't even told they exist. Only `showAnalytics`, `listMeetings`, the readable context, and `navigate` are offered. The system prompt also switches to an explicit read-only instruction.
+2. **Server actions.** Every write action calls `requireOwner()` and throws `FORBIDDEN` for a viewer. The read actions use `requireWorkspaceAccess(workspaceId)`, which lets owners through and viewers through only for a workspace they hold a valid join for.
+3. **The runtime route.** Authenticated-only, same-origin-only, rate-limited (see below).
+
+So a viewer can ask "how many tasks did Rohan ship in the last 7 days?", "analytics for the last 3 days", "what Linear issues are open?", "any meetings today?" — and get answers — but any create/update/delete/sync/assign/schedule request is refused and impossible to execute.
+
+## Security
+
+The runtime endpoint and actions are hardened for the app's threat model:
+
+- **Authentication** — `/api/copilotkit` rejects any request without a valid session, so the OpenAI key is never exposed to anonymous traffic.
+- **CSRF / cross-origin** — the route runs `requireSameOrigin(req)`; a cross-site page can't drive the model on a logged-in user's cookie.
+- **Rate limiting** — per-IP sliding window (40 req/min) caps cost and abuse of the model endpoint.
+- **Authorization** — writes are `requireOwner()`-gated; reads are `requireWorkspaceAccess()`-gated. The client toolset is also role-scoped (`canWrite`).
+- **Input validation** — every action zod-validates its input (length caps on titles/bodies, enum'd statuses, clamped analytics windows) before touching Prisma or an integration.
+- **No fabricated side effects** — the model is instructed never to claim success or invent links unless a tool returned `ok: true`; integration tools relay the real "not connected" error instead of pretending.
+- **Least privilege at the data layer** — the assistant only calls the same services the UI uses; it has no raw DB access and can't reach another workspace's data.
+
+## Grounding context
+
+Each turn the model is given live, read-only context via `useCopilotReadable`:
+
+- the current workspace (slug, name, whether hour tracking is on, today's date for relative deadlines),
+- open tasks (id + title + status + priority + due date),
+- recent tasks of **any** status incl. DONE/CANCELED (so it can resolve a completed/cancelled task's id, e.g. to delete it),
+- task counts by status.
+
+## Using it
+
+- Click the CopilotKit button in the bottom-right, or press **⌘/Ctrl + J**. **Esc** closes it.
+- Type a request and press **Enter** (**Shift+Enter** for a newline). Responses stream in; the stop button cancels generation.
+- The header has an **inspector** button (bug icon) and **+** to start a fresh conversation.
+- Responsive: docked panel on desktop, near-fullscreen sheet on mobile.
+
+## Configuration
+
+The assistant needs `OPENAI_API_KEY` in the environment (the same key used for work-log summaries — see [Integrations](04-integrations.md)). Without it the launcher still appears but the runtime can't generate responses. Integration-backed actions additionally require that integration to be connected for the workspace (Google for meetings/docs, Notion for Notion docs, Linear for issues); when it isn't, the assistant relays a clear "connect it in Settings" message. No CopilotKit API key is required — we self-host the runtime.
+
+## Extending it
+
+To add a new capability:
+
+1. If it writes data, add an owner-gated server action in [`assistant/actions.ts`](<../src/app/(app)/w/[workspace]/assistant/actions.ts>): `requireOwner()` (or `requireWorkspaceAccess` for a read), zod-validate input, call the existing service, `revalidatePath`, return `{ ok, … }`.
+2. Register a `useCopilotAction` in [`use-assistant-actions.tsx`](../src/features/assistant/use-assistant-actions.tsx) with a clear `description`, typed `parameters`, a `handler`, and `available: writeAvail` if it's a write tool (so viewers don't get it).
+3. Add the card's render to the registry (`registerToolRender("yourAction", …)`), returning a card from [`assistant-cards.tsx`](../src/features/assistant/assistant-cards.tsx). For destructive actions, stage-only in the handler and confirm in a `DeleteConfirmCard`-style card.
+4. If the model needs new context, add a `useCopilotReadable`.
+
+No UI changes are needed — the new tool is immediately controllable through natural language.

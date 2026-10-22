@@ -1,15 +1,48 @@
 ---
 title: Changelog
-description: Record product changes that alter how readers use the documented experience.
+description: Release history for RsOpsHub.
 ---
 
 ## v0.1.0
 
-The first published version of this documentation.
+Initial release of RsOpsHub, a self-hosted operations hub built with Next.js 16, React 19, Prisma 5, PostgreSQL, Tailwind CSS 4, and CopilotKit 1.77. Bun is used for installation and scripts.
 
-- A task-focused introduction and quickstart
-- Browsable API documentation generated from `openapi.yaml`
-- Agent-readable discovery files and a read-only MCP endpoint
+### Workspace-based operations hub
 
-Replace this entry with changes your readers need to understand. Lead with the
-impact, then link to the guide or reference that explains the new behavior.
+Each workspace has its own slug, timezone, access code, and per-integration connection settings. Owner accounts get full read/write access; viewers authenticate with a 16-character access code for read-only access.
+
+### Content tracking
+
+Track and sync content from Reddit, Hacker News, and dev.to. Each source can be enabled per workspace and synced on a nightly schedule or on demand. Content records carry metrics such as impressions, upvotes, comments, and engagement rate, with time-series snapshots stored in a dedicated metrics model.
+
+### Tasks and Linear integration
+
+Create and manage local tasks with status, priority, and tags. Connect a Linear API key per workspace to sync teams, issues, and issue templates. The assistant and UI can create, update, assign, and archive Linear issues.
+
+### Daily work logs with AI summaries
+
+One work-log entry per workspace per day, with optional hours tracking. When an OpenAI or LiteLLM API key is configured, day and date-range summaries are generated automatically. Without a key, summaries fall back to deterministic text.
+
+### Documents and spreadsheets
+
+Create and edit documents locally, or connect to Notion (global integration token) and Google Docs (per-workspace OAuth). Spreadsheets support local editing and Google Sheets. Google Drive shared-with-me documents can be claimed through a pending-offer flow.
+
+### Calendar and Google Meet
+
+In-app calendar events cover general, publishing, deadline, meeting, and reminder types. With Google OAuth connected, the app fetches Google Calendar events and can create meetings with Meet links.
+
+### Analytics
+
+Connect PostHog (per-workspace API key and project ID) for traffic-by-referrer and detailed breakdowns, or Cloudflare (per-workspace API token and zone ID) for zone-level request, page-view, and threat analytics.
+
+### AI assistant
+
+CopilotKit-powered assistant at `/api/copilotkit`, gated by session auth and rate-limited to 40 requests per minute. Supports task management, document creation, content and Linear sync, meeting creation, and analytics queries. Uses `gpt-4o-mini` via OpenAI, with LiteLLM as a fallback provider and an empty adapter when no key is set.
+
+### Authentication and security
+
+Owner login uses constant-time scrypt comparison with exponential lockout. Sessions are AES-256-GCM encrypted and HMAC-SHA256 signed cookies. Third-party tokens are encrypted at rest with AES-256-GCM. CSRF protection via same-origin checks. In-memory sliding-window rate limiting.
+
+### Background jobs
+
+A `node-cron` in-process scheduler runs content sync, notification checks, and work-log backfill on a nightly schedule when not deployed to Vercel. A serverless `/api/cron` endpoint accepts a bearer token and supports scoping to specific job types or workspaces.

@@ -1,0 +1,144 @@
+---
+title: Deployment
+description: Deploy RsOpsHub to Vercel, Fly.io, Railway, a self-hosted VM, or Docker, and migrate your database to a managed PostgreSQL provider.
+---
+
+RsOpsHub is a normal Next.js 15 standalone app with a Postgres dependency. You can deploy it anywhere that can run a Node 20 server and reach Postgres. This guide walks through the four most popular hosting paths, plus how to migrate your local Postgres database to a managed cloud database when you're ready for production. Pick whichever platform fits your taste — the application doesn't lock you into any of them.
+
+## Platforms at a glance
+
+If you're just trying to pick a host, the table below summarises the trade-offs. The detailed sections below each platform cover the actual commands.
+
+| Platform | Free tier | In-process cron works | Postgres included | Best for |
+|---|---|---|---|---|
+| Vercel | yes | needs Vercel Cron Jobs | no (pair with Neon / Supabase) | Hobby deployments + ones already on Vercel |
+| Fly.io | hobby plan ($) | yes | optional Fly Postgres | Full-control deployments that want a real VM |
+| Railway | trial credit | yes | one-click Postgres plugin | Fastest "click deploy" with bundled Postgres |
+| Render | free web service | yes | managed Postgres add-on | Heroku-style developer experience |
+| Self-host (VM) | depends on provider | yes | install Postgres locally or remote | Anyone who already runs a server |
+| Docker | depends on host | yes (with the right runtime) | use a sidecar postgres service | Air-gapped or compliance-heavy environments |
+
+## Build outputs
+
+Before deploying anywhere, you need to understand what the build produces. `bun run build` compiles the app into `.next/`. By default Next produces a standard server build that requires the whole `node_modules` directory at runtime; that works for VM-style hosts (Fly, Railway, your own server). For platforms that prefer a smaller image (Docker, some serverless hosts) you can switch `next.config.ts` to `output: "standalone"` and Next will produce a self-contained `.next/standalone/` folder with only the modules it actually needs. Both options are fine; pick whichever matches your host.
+
+The in-process cron schedule (HN sync, dev.to refresh, daily worklog) needs the server process to stay alive across HTTP requests. That rules out short-lived serverless runtimes like the AWS Lambda free tier or Cloudflare Workers' free plan if you want the cron to fire. Vercel, Fly, Railway, Render, and any classic VM keep the process alive long enough.
+
+## Vercel
+
+Vercel is the closest-to-zero-config option. Connect your private repository, set the environment variables in the project's settings, and Vercel handles the build, the CDN, and TLS automatically. The catch is that Vercel's serverless functions short-circuit `node-cron`, so the daily worklog and dev.to refresh won't fire unless you replace them with Vercel Cron Jobs. To do that, add a `vercel.json` like the example below, expose a tiny `/api/cron/<name>` route for each job, and protect each route with a shared secret check.
+
+```json
+{
+  "crons": [
+    { "path": "/api/cron/hn-sync", "schedule": "0 */3 * * *" },
+    { "path": "/api/cron/devto-sync", "schedule": "30 3 * * *" },
+    { "path": "/api/cron/daily-worklog", "schedule": "55 23 * * *" }
+  ]
+}
+```
+
+The cron routes should call the same service functions the in-process scheduler does (`syncHackerNewsForWorkspace`, `syncDevtoForWorkspace`, etc.) and check `req.headers["x-vercel-cron"]` to confirm Vercel is the caller. Vercel runs cron jobs in UTC, so adjust the schedule if you care about local time. For Postgres you'll either point `DATABASE_URL` at Neon / Supabase (recommended — see the migration section below) or accept that the database lives on a separate provider from the app.
+
+## Fly.io
+
+Fly is the most "real server" option that still has a friendly developer experience. The provided `bun run build` + `bun run start` works on Fly without modification. Generate a `fly.toml` with `fly launch`, accept the defaults, then add an internal `[deploy]` step that runs `bunx prisma migrate deploy` on every release so your schema stays in sync. Set the env variables with `fly secrets set OWNER_EMAIL=… OWNER_PASSWORD=… SESSION_SECRET=… TOKEN_ENC_KEY=… DATABASE_URL=…`. The in-process cron works as expected because the Fly machine is a real long-running VM.
+
+For Postgres on Fly, you can use `fly postgres create` to spin up a managed Postgres cluster on the same network, then attach it with `fly postgres attach`. Fly's Postgres offering is solid for small workloads. For larger ones, point `DATABASE_URL` at Neon or Supabase and skip Fly Postgres entirely.
+
+## Railway
+
+Railway is the most batteries-included option. Connect your private repository, add a Postgres plugin from the marketplace (Railway provisions one in seconds and injects `DATABASE_URL` automatically), set the rest of the env variables in the project's Variables tab, and deploy. The build command is `bun run build`, the start command is `bun run start`. The in-process cron works on Railway because the process is long-running. If you'd rather use Neon / Supabase for Postgres, skip the marketplace plugin and paste your external `DATABASE_URL` instead — both work identically.
+
+## Self-host (DigitalOcean / Hetzner / your own server)
+
+If you want full control, deploy to any VM with Node 20 and a reverse proxy. The standard recipe is: provision an Ubuntu 22.04 or 24.04 box, install Node and Bun, install Postgres (or point at a cloud Postgres), clone the repo, install dependencies, build, and run `bun run start` behind nginx or Caddy with a Let's Encrypt certificate. Use `pm2` or a systemd unit to keep the process alive:
+
+```ini
+# /etc/systemd/system/rsopshub.service
+[Unit]
+Description=RsOpsHub Next.js server
+After=network.target
+
+[Service]
+WorkingDirectory=/srv/rsopshub
+Environment=NODE_ENV=production
+EnvironmentFile=/srv/rsopshub/.env.local
+ExecStart=/usr/bin/bun run start
+Restart=on-failure
+User=rsopshub
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Reload with `systemctl daemon-reload && systemctl enable --now rsopshub` and you have a Postgres-backed Next app running on port 3000 ready to be fronted by nginx. The in-process cron works perfectly here because the server process literally never restarts unless you tell it to.
+
+## Docker
+
+If your host wants a container, the simplest Dockerfile is below. Build with `docker build -t rsopshub .` and run with `docker run -p 3000:3000 --env-file .env.local rsopshub`. For Docker Compose with Postgres, drop in a stock `postgres:16` service alongside.
+
+```dockerfile
+FROM oven/bun:1 AS deps
+WORKDIR /app
+COPY package.json bun.lockb ./
+RUN bun install --frozen-lockfile
+
+FROM oven/bun:1 AS build
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN bun run build
+
+FROM oven/bun:1 AS run
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=build /app ./
+EXPOSE 3000
+CMD ["bun", "run", "start"]
+```
+
+## Migrating Postgres to Neon
+
+[Neon](https://neon.tech) is a serverless Postgres provider with a generous free tier that's perfect for personal RsOpsHub deployments. Sign up, create a project (pick the region closest to your app host), and copy the connection string Neon gives you. Then back up your local database and restore it:
+
+```bash
+pg_dump postgresql://postgres:password@localhost:5432/rsopshub > rsopshub.sql
+psql "<neon-connection-string>" < rsopshub.sql
+```
+
+Neon's connection string already includes `sslmode=require` which is what Prisma expects. Paste the full URL into `DATABASE_URL`, redeploy, and you're now running against Neon with no other code changes. The first time the app connects, Neon spins up a compute instance (cold start ~500 ms). For the second-and-later request the connection is pooled. If you see Prisma complain about prepared statements after enabling pooling, switch the Prisma client to use Neon's pooler endpoint (the URL ending in `-pooler`) and add `?pgbouncer=true&connection_limit=1` to the connection string — those are the standard Prisma + PgBouncer flags.
+
+## Migrating Postgres to Supabase
+
+[Supabase](https://supabase.com) gives you Postgres plus a bunch of extras (auth, storage, edge functions) you don't need for RsOpsHub, but their free Postgres tier is excellent and the dashboard is friendly. Create a Supabase project, grab the connection string from **Project settings → Database → Connection string**, and use the "Session mode" string (port 5432) for Prisma. Then dump and restore exactly like the Neon path:
+
+```bash
+pg_dump postgresql://postgres:password@localhost:5432/rsopshub > rsopshub.sql
+psql "<supabase-connection-string>" < rsopshub.sql
+```
+
+Set `DATABASE_URL` to the Supabase connection string in your host's env variables and redeploy. The "Session mode" string is the right one for Prisma; the "Transaction mode" string (port 6543, pooled by PgBouncer) requires `?pgbouncer=true` and disables prepared statements which Prisma can handle as long as you add the flag.
+
+## Migrating to any other managed Postgres
+
+The pattern is identical for AWS RDS, Google Cloud SQL, Azure Database for PostgreSQL, DigitalOcean Managed Databases, Render Postgres, and Heroku Postgres. Provision the database, dump from your source with `pg_dump`, restore with `psql`, and update `DATABASE_URL`. If the new host requires SSL (most do), add `?sslmode=require` to the connection string.
+
+## Custom domain and TLS
+
+Whatever host you pick, point your domain's `A` / `AAAA` / `CNAME` record at the host, then enable TLS. Vercel, Fly, Railway, and Render handle the certificate automatically. On a self-hosted VM, install Caddy (it does TLS by default) or nginx + certbot. Once you have HTTPS working, update `APP_URL` in your env to match the real `https://…` URL — Google OAuth uses this value verbatim for the redirect URI, so a stale `localhost:3000` value will cause the integration to fail with an `Error 400: redirect_uri_mismatch` from Google.
+
+## After deploying
+
+Sign in as the owner once to make sure the session round-trips. Connect Google in Integrations (the OAuth flow will redirect to `<APP_URL>/api/integrations/google/callback`, which must be in your authorised redirect URIs). Connect Linear and dev.to per workspace. Set up your Notion integration if you want documents. Watch the server logs for the first cron tick (HN sync runs every three hours starting at the top of an hour) to confirm the scheduler is alive. That's it — the workspace is live.
+
+## Backups
+
+You're now responsible for backing up your data. The trivial backup is a daily `pg_dump` written to S3 / R2 / Backblaze:
+
+```bash
+pg_dump "<DATABASE_URL>" | gzip > rsopshub-$(date -I).sql.gz
+```
+
+Stick that in a cron job on the app host or use the managed database's built-in backups (Neon, Supabase, RDS, Cloud SQL all provide automated daily snapshots). If you're paranoid, restore one of those snapshots into a clean Postgres instance every month to confirm it's actually restorable — backups you never test are not backups.
